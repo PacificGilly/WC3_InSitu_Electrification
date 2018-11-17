@@ -5,6 +5,8 @@ import time as systime
 
 from .manipulation import argnear
 
+__doc__ = "Built for Python 2.7. Upgrading to Python 3.7 soon!"
+
 def argpercentile(x, percentile):
 	"""Outputs the index of the percentile value for the data.
 	
