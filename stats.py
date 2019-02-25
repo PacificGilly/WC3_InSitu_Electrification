@@ -1,7 +1,8 @@
 import numpy as np
 import scipy as sp
 import statsmodels.api as sm
-import sys, warnings
+import sys
+import warnings
 try:
 	from sklearn.linear_model import TheilSenRegressor, HuberRegressor
 	Huber = True
@@ -9,13 +10,24 @@ except ImportError:
 	from sklearn.linear_model import TheilSenRegressor
 	Huber = False
 
+from collections import namedtuple	
+	
 from .manipulation import stride, broadcast, digitize, searchsorted
 from .nanfunctions import antinan, antifinite
 from .math import power
 
+sys.path.insert(0, '/home/users/th863480/PhD/Global_Functions/Prerequisites/modules')
+import somestats.bootstrap as boot
+
 femto = sys.float_info.epsilon
 
 __version__ = 1.1
+
+HuberRegressionResult = namedtuple('HuberRegressionResult', ('slope', 
+															'intercept',
+															'rvalue', 
+															'pvalue',
+															'stderr'))
 
 ### Covariance Methods ###
 #Below is a list of covariance algorithms which have been found from
@@ -547,7 +559,7 @@ def TheilSenRegression(x,y, n_subsamples=None, random_state=42):
 	
 	return line_x, y_predict, estimator.coef_, estimator.intercept_, r_value
 
-def HuberRegression(x,y,epsilon=1.36):
+def HuberRegression(x,y,epsilon=1.36, package='statsmodel'):
 	"""Calculates the Huber linear regression model. Like the Theil-Sen model, the Huber is 
 	resilient to outliers present in the data. 
 	
@@ -560,23 +572,39 @@ def HuberRegression(x,y,epsilon=1.36):
 	
 	if Huber is False: raise ImportError("[Warning] HuberRegression is not available in this version of python. :(")
 	
-	#Initialise the Theil-Sen Linear Regression Model
-	estimator = HuberRegressor(epsilon=epsilon)
-	
 	#Remove nan's in data
 	x, y = antifinite((x,y), unpack=True)
+		
+	if package == 'sklearn':
+		
+		#Initialise the Theil-Sen Linear Regression Model
+		estimator = HuberRegressor(epsilon=epsilon)
+		
+		#Fit the regression model to data. N.B. add extra dimension [:,None] to x to calculate intercept.
+		estimator.fit(x[:,None],y)
+		
+		#Predict the data from the model
+		line_x = np.array([np.nanmin(x), np.nanmax(x)])
+		y_predict = estimator.predict(line_x[:,None])
+		
+		#Calculate r-value
+		r_value = power(R1to1(y, estimator.predict(x[:,None])), 0.5)
+		
+		#return line_x, y_predict, estimator.coef_, estimator.intercept_, r_value
+		return HuberRegressionResult(estimator.coef_[0], estimator.intercept_, r_value, np.nan, np.nan)
 	
-	#Fit the regression model to data. N.B. add extra dimension [:,None] to x to calculate intercept.
-	estimator.fit(x[:,None],y)
+	elif package == 'statsmodel':
+		
+		#Initalise Huber model
+		rlm_model = sm.RLM(y, sm.add_constant(x), M=sm.robust.norms.HuberT(epsilon))
+		
+		#fit model
+		rlm_results = rlm_model.fit()
+		
+		#Calculate r-value
+		r_value = power(R1to1(y, rlm_results.predict(sm.add_constant(x))), 0.5)
 	
-	#Predict the data from the model
-	line_x = np.array([np.nanmin(x), np.nanmax(x)])
-	y_predict = estimator.predict(line_x[:,None])
-	
-	#Calculate r-value
-	r_value = power(R1to1(y, estimator.predict(x[:,None])), 0.5)
-	
-	return line_x, y_predict, estimator.coef_, estimator.intercept_, r_value
+		return HuberRegressionResult(rlm_results.params[1], rlm_results.params[0], r_value, rlm_results.pvalues[1], rlm_results.bse[1])
 	
 def reg_m(y, x):
 	"""Multiple linear regression using statsmodel:
@@ -991,9 +1019,101 @@ def lowess(x, y, f=2. / 3., iter=3):
         delta = (1 - delta ** 2) ** 2
 
     return yest
-		
+
+def SSR(x, y):
+	"""
+	Calcualtes the sum of the square residuals between x and y
+	"""
 	
-def ensemble(xdata, ydata, bins, average=('mean', 'median'), mode=False, undersample=False, slim=False, usestride=False, bootstrap=False, unpack=False):
+	# Ensure data is an ndarray
+	x = np.asarray(x)
+	y = np.asarray(y)
+	
+	# Calculate sum of the squre residuals
+	return np.nansum((x - y)**2)
+	
+def log_likelihood(model, endog):
+	"""
+	Calcualtes the log-likelihood function from a one-dimensional set
+	
+	Parameters
+	----------
+	model : 1D array_like
+		A one-dimensional array_like of the model output. Size must
+		match endog
+	endog : 1D array_like
+		A one-dimensional array_like of the data to create the model.
+		(e.g. for a model y = m*x + c, endog is the y-data)
+	"""
+	
+	# Ensure data is an ndarray
+	model = np.asarray(model)
+	endog = np.asarray(endog)
+	
+	# Error checking
+	if (model.ndim != 1) or (endog.ndim != 1):
+		raise ValueError("log_likelihood requires the inputs to be 1 dimensional")
+	
+	if model.size != endog.size:
+		raise ValueError("log_likelihood requires model and endog to have the same length")
+	
+	# Calcualte number of observations
+	nobs = endog.size
+	nobs2 = endog.size / 2.0
+
+	# Calculate the mean and variance
+	mean = np.nanmean(endog)
+	variance = np.nanvar(endog)
+	
+	# Calculate sum of square residuals
+	ssr = SSR(endog, model)
+	
+	# Calculate log-likelihood
+	# return -nobs / 2 * (np.log(2 * np.pi) - np.log(variance)) - ssr / (2 * variance)		# Wikipedia method
+	return -nobs2 * (np.log(2 * np.pi) + np.log(ssr / nobs) + 1)						# Statsmodel method
+	   
+def AIC(model, endog, k):
+	"""
+	Calculate the Akaike Information Criterion
+	
+	Parameters
+	----------
+	model : 1D array_like
+		A one-dimensional array_like of the model output. Size must
+		match endog
+	endog : 1D array_like
+		A one-dimensional array_like of the data to create the model.
+		(e.g. for a model y = m*x + c, endog is the x-data)
+	k : int
+		The number of parameters used to define the model. This is the
+		sum of the coefficients, intercept and variance. i.e. 
+			
+		k = c + i + v
+	
+	References
+	----------
+	https://www.researchgate.net/post/What_is_the_AIC_formula
+	https://stats.stackexchange.com/questions/87345/calculating-aic-by-hand-in-r
+	https://www.statsmodels.org/dev/_modules/statsmodels/regression/linear_model.html#OLS.loglike
+	https://en.wikipedia.org/wiki/Akaike_information_criterion#cite_note-19	
+	"""
+	
+	return 2 * k - 2 * log_likelihood(model, endog)
+
+def AICc(model, endog, k):
+	""" 
+	Calcualtes the adjusted Akaike Information Criterion which is useful
+	when the sample size is small [What defines small?]. This is used
+	to avoid overfitting of the standard AIC diagnostic.
+	
+	Parameters
+	----------
+	See AIC
+	"""
+	
+	return AIC(model, endog, k) + (2 * k**2 + 2 * k) / (np.size(endog) - k - 1)
+		
+def ensemble(xdata, ydata, bins, average=('mean', 'median'), method='ma', mode=False, undersample=False, slim=False, usestride=False, confidence_intervals='standard', unpack=False):
 	"""Averages the ydata set by binning the xdata set into bins of equal elements.
 	
 	Parameters
@@ -1012,14 +1132,27 @@ def ensemble(xdata, ydata, bins, average=('mean', 'median'), mode=False, undersa
 		
 						average = (xdata_type, ydata_type)
 								= ('mean', 'median')
-	mode : boolean or int, optional
-		Specify if you should average over unique elements only (default = False) or
-		whether you should roll the bins over all elements (True).
+	method : str or int, optional
+		Specify if you should average over unique elements only (default = 'unique') or
+		whether you should roll the bins over all elements ('ma'). If an integer is 
+		specified the number will be used to select the number of elements to roll over.
+		Final method is 'bootstrap' which slowly increases the number of data elements
+		in each bin until the entire population is in one bin. Then the reverse occurs
+		when the first elements are removed one by one until only one element remains.
+	mode : DEPRECIATED
 	undersample : boolean, optional
 		Specify if you should average the areas of data that are under sampled. Default
 		is false and therefore does not average the under sample data. When set to True
 		the number of elements are in the bins near the boundary are subsequently 
 		reduced until only a 1 element bin exists.
+	confidence_intervals : str, optional
+		Specify how you want to define the errors of the averaged data. All confidence
+		intervals are given as 95th percentiles. Options are,
+		
+		'standard' : use the standard error formula. If median averaging is used the
+					 approximation is used to correct for the sample. SE = 1.253*SE
+		'bootstrap' : use a bootstrapping algorithm to estimate the confidence
+					  intervals. N.B. this method is very slow.
 		
 	Examples
 	--------
@@ -1066,9 +1199,18 @@ def ensemble(xdata, ydata, bins, average=('mean', 'median'), mode=False, undersa
 		to represent these areas of data. It must be stressed in either report writing or to the
 		user that these downscaled areas must be taken with caution as they have not been averaged
 		in the same manner as the well sample areas of the dataset.
+		
+	3) Now supports correct assessment of confidence intervals when the median statistic is used.
 	
 	"""
-
+	
+	if mode is not False: 
+		FutureWarning("[gu.ensemble] mode is now depreciated. Use method kwarg instead. For now we'll do the heavy lifting for you!")
+		if mode is True:
+			method = 'ma'
+		else:
+			method = mode
+		
 	#Sort data by ascending xdata
 	mask = np.argsort(xdata, kind='mergesort')
 	ydata = ydata[mask].astype(float)
@@ -1077,7 +1219,7 @@ def ensemble(xdata, ydata, bins, average=('mean', 'median'), mode=False, undersa
 	with warnings.catch_warnings():
 		warnings.simplefilter("ignore")
 		
-		if bootstrap is False:
+		if method !=  'bootstrap':
 			if isinstance(bins, int):
 			
 				#Constants
@@ -1092,7 +1234,7 @@ def ensemble(xdata, ydata, bins, average=('mean', 'median'), mode=False, undersa
 						xdata_average = average if isinstance(average, str) else average[0]
 						
 						#Calculate MidPoint
-						data_bin_x = broadcast(xdata, elems, elems) if mode is False else broadcast(xdata, elems, mode)
+						data_bin_x = broadcast(xdata, elems, elems) if method == 'unique' else broadcast(xdata, elems, method)
 						MidPoints = np.nanmedian(data_bin_x, axis=1) if xdata_average == 'median' else np.nanmean(data_bin_x, axis=1)
 						
 						#Calculate Boundaries
@@ -1103,15 +1245,23 @@ def ensemble(xdata, ydata, bins, average=('mean', 'median'), mode=False, undersa
 						
 						ydata_average = average if isinstance(average, str) else average[1]
 						
-						#Calculate Average and Standard Error
-						data_bin_y = broadcast(ydata, elems, elems) if mode is False else broadcast(ydata, elems, mode)
+						#Calculate Average
+						data_bin_y = broadcast(ydata, elems, elems) if method == 'unique' else broadcast(ydata, elems, method)
 						Average = np.nanmedian(data_bin_y, axis=1) if ydata_average == 'median' else np.nanmean(data_bin_y, axis=1)
-						SE = np.nanstd(data_bin_y, axis=1)/np.sqrt(elems)
+						
+						#Calculate Confidence Limit
+						if confidence_intervals == 'standard':
+							SE = 1.96*np.nanstd(data_bin_y, axis=1)/np.sqrt(elems) if ydata_average == 'mean' else 1.96*(1.253*np.nanstd(data_bin_y, axis=1)/np.sqrt(elems))
+						elif confidence_intervals == 'bootstrap':
+							SE = boot.ci(data_bin_y.T, lambda x: np.mean(x, axis=0)).ptp(axis=0) if ydata_average == 'mean' else boot.ci(data_bin_y.T, lambda x: np.median(x, axis=0)).ptp(axis=0)
+						else:
+							raise ValueError("[gu.ensemble] confidence_intervals was incorrectly specified. We got %s. Available options are: 'standard', 'bootstrap'" % confidence_intervals)
+					
 					else:
 						xdata_average = average if isinstance(average, str) else average[0]
 						
 						#Calculate MidPoint
-						data_bin_x = stride(xdata, elems, elems) if mode is False else stride(xdata, elems, mode)
+						data_bin_x = stride(xdata, elems, elems) if method == 'unique' else stride(xdata, elems, method)
 						MidPoints = np.nanmedian(data_bin_x, axis=1) if xdata_average == 'median' else np.nanmean(data_bin_x, axis=1)
 						
 						#Calculate Boundaries
@@ -1122,11 +1272,18 @@ def ensemble(xdata, ydata, bins, average=('mean', 'median'), mode=False, undersa
 						
 						ydata_average = average if isinstance(average, str) else average[1]
 						
-						#Calculate Average and Standard Error
-						data_bin_y = stride(ydata, elems, elems) if mode is False else stride(ydata, elems, mode)
+						#Calculate Average
+						data_bin_y = stride(ydata, elems, elems) if method == 'unique' else stride(ydata, elems, method)
 						Average = np.nanmedian(data_bin_y, axis=1) if ydata_average == 'median' else np.nanmean(data_bin_y, axis=1)
-						SE = np.nanstd(data_bin_y, axis=1)/np.sqrt(elems)
-					
+						
+						#Calculate Confidence Limit
+						if confidence_intervals == 'standard':
+							SE = 1.96*np.nanstd(data_bin_y, axis=1)/np.sqrt(elems) if ydata_average == 'mean' else 1.96*(1.253*np.nanstd(data_bin_y, axis=1)/np.sqrt(elems))
+						elif confidence_intervals == 'bootstrap':
+							SE = boot.ci(data_bin_y.T, lambda x: np.mean(x, axis=0)).ptp(axis=0) if ydata_average == 'mean' else boot.ci(data_bin_y.T, lambda x: np.median(x, axis=0)).ptp(axis=0)
+						else:
+							raise ValueError("[gu.ensemble] confidence_intervals was incorrectly specified. We got %s. Available options are: 'standard', 'bootstrap'" % confidence_intervals)
+				
 				elif undersample is True:
 					"""data_bin_x and data_bin_y are OBJECT ndarrays so element-wise operations
 					CANNOT be performed succinctly. Therefore, we have to calculate the mean, 
@@ -1140,7 +1297,7 @@ def ensemble(xdata, ydata, bins, average=('mean', 'median'), mode=False, undersa
 						xdata_average = average if isinstance(average, str) else average[0]
 						
 						#Calculate MidPoint
-						data_bin_x = broadcast(xdata, elems, elems, undersample=True) if mode is False else broadcast(xdata, elems, mode, undersample=True)
+						data_bin_x = broadcast(xdata, elems, elems, undersample=True) if method == 'unique' else broadcast(xdata, elems, method, undersample=True)
 						MidPoints = np.nanmedian(data_bin_x, axis=1) if xdata_average == 'median' else np.nanmean(data_bin_x, axis=1)
 
 						#Calculate Under-sampled Boundaries
@@ -1152,15 +1309,23 @@ def ensemble(xdata, ydata, bins, average=('mean', 'median'), mode=False, undersa
 						
 						ydata_average = average if isinstance(average, str) else average[1]
 						
-						#Calculate Average and Standard Error
-						data_bin_y = broadcast(ydata, elems, elems, undersample=True) if mode is False else broadcast(ydata, elems, mode, undersample=True)
+						#Calculate Average
+						data_bin_y = broadcast(ydata, elems, elems, undersample=True) if method == 'unique' else broadcast(ydata, elems, method, undersample=True)
 						Average = np.nanmedian(data_bin_y, axis=1) if ydata_average == 'median' else np.nanmean(data_bin_y, axis=1)
-						SE = np.nanstd(data_bin_y, axis=1)/np.sqrt(elems)
+						
+						#Calculate Confidence Limit
+						if confidence_intervals == 'standard':
+							SE = 1.96*np.nanstd(data_bin_y, axis=1)/np.sqrt(elems) if ydata_average == 'mean' else 1.96*(1.253*np.nanstd(data_bin_y, axis=1)/np.sqrt(elems))
+						elif confidence_intervals == 'bootstrap':
+							SE = boot.ci(data_bin_y.T, lambda x: np.mean(x, axis=0)).ptp(axis=0) if ydata_average == 'mean' else boot.ci(data_bin_y.T, lambda x: np.median(x, axis=0)).ptp(axis=0)
+						else:
+							raise ValueError("[gu.ensemble] confidence_intervals was incorrectly specified. We got %s. Available options are: 'standard', 'bootstrap'" % confidence_intervals)
+					
 					else:
 						xdata_average = average if isinstance(average, str) else average[0]
 						
 						#Calculate MidPoint
-						data_bin_x = stride(xdata, elems, elems, undersample=True) if mode is False else stride(xdata, elems, mode, undersample=True)
+						data_bin_x = stride(xdata, elems, elems, undersample=True) if method == 'unique' else stride(xdata, elems, method, undersample=True)
 						MidPoints = np.nanmedian(data_bin_x, axis=1) if xdata_average == 'median' else np.nanmean(data_bin_x, axis=1)
 						#print("MIDPOINTS DONE")
 						#Calculate Under-sampled Boundaries
@@ -1172,11 +1337,18 @@ def ensemble(xdata, ydata, bins, average=('mean', 'median'), mode=False, undersa
 						
 						ydata_average = average if isinstance(average, str) else average[1]
 						
-						#Calculate Average and Standard Error
-						data_bin_y = stride(ydata, elems, elems, undersample=True) if mode is False else stride(ydata, elems, mode, undersample=True)
+						#Calculate Average
+						data_bin_y = stride(ydata, elems, elems, undersample=True) if method == 'unique' else stride(ydata, elems, method, undersample=True)
 						Average = np.nanmedian(data_bin_y, axis=1) if ydata_average == 'median' else np.nanmean(data_bin_y, axis=1)
-						SE = np.nanstd(data_bin_y, axis=1)/np.sqrt(elems)
-				
+						
+						#Calculate Confidence Limit
+						if confidence_intervals == 'standard':
+							SE = 1.96*np.nanstd(data_bin_y, axis=1)/np.sqrt(elems) if ydata_average == 'mean' else 1.96*(1.253*np.nanstd(data_bin_y, axis=1)/np.sqrt(elems))
+						elif confidence_intervals == 'bootstrap':
+							SE = boot.ci(data_bin_y.T, lambda x: np.mean(x, axis=0)).ptp(axis=0) if ydata_average == 'mean' else boot.ci(data_bin_y.T, lambda x: np.median(x, axis=0)).ptp(axis=0)
+						else:
+							raise ValueError("[gu.ensemble] confidence_intervals was incorrectly specified. We got %s. Available options are: 'standard', 'bootstrap'" % confidence_intervals)
+					
 			else:
 				#Prerequisites
 				bins = np.array(bins)
@@ -1199,7 +1371,7 @@ def ensemble(xdata, ydata, bins, average=('mean', 'median'), mode=False, undersa
 					Average = np.nanmean(data_bin_y, axis=1)
 				elif ydata_average == 'sum':
 					Average = np.nansum(data_bin_y, axis=1)
-				SE = np.nanstd(data_bin_y, axis=1)/np.sqrt(Bin_Size)
+				SE = np.nanstd(data_bin_y, axis=1)/np.sqrt(Bin_Size) if ydata_average == 'mean' else boot.ci(data_bin_y.T, lambda x: np.median(x, axis=0)).ptp(axis=0)
 								
 				# sys.exit()
 				
@@ -1246,7 +1418,7 @@ def ensemble(xdata, ydata, bins, average=('mean', 'median'), mode=False, undersa
 			data_bin_y = stride(ydata, ydata.size, 1, undersample=True)[elems-1::elems]
 		
 			Average = np.nanmedian(data_bin_y, axis=1) if ydata_average == 'median' else np.nanmean(data_bin_y, axis=1)
-			SE = np.nanstd(data_bin_y, axis=1)/np.sqrt(ydata.size)
+			SE = np.nanstd(data_bin_y, axis=1)/np.sqrt(ydata.size) if ydata_average == 'mean' else boot.ci(data_bin_y, lambda x: np.median(x, axis=1)).ptp(axis=1)
 		
 			#Force slim to be True
 			slim = True

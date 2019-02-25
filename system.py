@@ -1,7 +1,20 @@
 from __future__ import print_function
-import numpy as np
-import os, shutil, threading, errno, signal, logging
 
+import sys
+import os
+import shutil
+import threading
+import errno
+import signal
+import logging
+import collections
+import urllib2
+import warnings
+
+import numpy as np
+import pandas as pd
+
+from StringIO import StringIO
 from .extras import cprint
 
 class DelayedKeyboardInterrupt(object):
@@ -54,21 +67,134 @@ class DelayedKeyboardInterrupt(object):
 		signal.signal(signal.SIGQUIT, self.ctrlslash_handler)
 		if self.signal_received:
 			self.ctrlslash_handler(*self.signal_received)
-			
-def ensure_dir(dirname):
-    """Ensure that a named directory exists; if it does not, attempt to create it.
-    
-	Sources
-	-------
-	http://stackoverflow.com/a/21349806
+
+class unbuffered(object):
+	"""Forces the print statements to be written without the need for flushing. Useful for
+	sending print statements to text files when running python on a cluster.
+	
+	Usage
+	-----
+	import sys
+	import Gilly_Utilities as gu
+
+	sys.stdout = gu.unbuffered(sys.stdout)
+	
+	Reference
+	---------
+	https://stackoverflow.com/a/107717/8765762
+	"""
+	
+	def __init__(self, stream):
+		self.stream = stream
+	def write(self, data):
+		self.stream.write(data)
+		self.stream.flush()
+	def writelines(self, datas):
+		self.stream.writelines(datas)
+		self.stream.flush()
+	def __getattr__(self, attr):
+		return getattr(self.stream, attr)
+
+class suppress_output(object):
+	"""Suppresses the output of the sys.stdout.write and so no output
+	will be visible on the console.
+	
+	To use this class place in code like so,
+	
+	with gu.suppress_output():
+		...
+		
+	...
+	
+	References
+	----------
+	https://stackoverflow.com/a/8391735/8765762
+	https://stackoverflow.com/a/45669280/8765762
+	"""
+	
+	def __enter__(self):
+		self._original_stdout = sys.stdout
+		sys.stdout = open(os.devnull, 'w')
+	def __exit__(self, type, value, traceback):
+		sys.stdout.close()
+		sys.stdout = self._original_stdout
+
+def isarray(arg):
+	"""Checks whether arg is array_like (e.g. tuple, list, np.ndarray, etc.)"""
+	
+	#return type(arg) is not str and isinstance(arg, collections.Sequence)
+	
+	dtypes = [list, tuple, np.ndarray, pd.DataFrame]
+	return np.any([isinstance(arg, dtype) for dtype in dtypes])
+
+def isnumeric(arg, warn=True):
+	"""
+	Test element-wise for numerics (e.g. 2.4, 2).
+
+	The result is returned as a boolean array.
+	"""
+	
+	# Force arg to be a numpy array
+	arg = np.atleast_1d(arg)
+	
+	# Check for finitness
+	try:
+		return np.isfinite(arg)
+	except TypeError:
+		if warn is True:
+			warnings.warn("[gu.isnumeric] invalid data type found in arg. Returning False", UserWarning, stacklevel=2)
+		return np.array(False)
+
+def isnone(arg, keepshape=True):
+	"""
+	Test element-wise for nones.
+
+	The result is returned as a boolean array.
 	"""
 
+	# Force arg to be a numpy array
+	arg = np.atleast_1d(arg)
+	nones_full = np.zeros(arg.shape, dtype=bool)
+	
+	# Create index array of arg to reorganise after we need to flatten arg
+	index = np.arange(arg.size).reshape(arg.shape)
+	
+	# Flatten arg array
+	arg = np.hstack(arg.flat)
+	index_flat = np.hstack(index)
+	
+	# Check for nones
+	nones = np.array([val is None for val in arg], dtype=bool)
+	
+	if keepshape is True:
+		
+		# Return a restructured array
+		for ind, val in zip(index_flat, nones):
+			nones_full[np.where(index == ind)] = val
+		
+		return nones_full
+	
+	else:
+		return nones
+	
+def ensure_dir(dirname, dir_or_file='dir'):
+    """Ensure that a named directory exists; if it does not, attempt to create it.
+    
+    Sources
+    -------
+    http://stackoverflow.com/a/21349806
+    """
+
+    # Copy dirname to return to user
+    dirname_return = dirname
+
     try:
-        os.makedirs(dirname)
+        os.makedirs(dirname) if dir_or_file == 'dir' else os.makedirs(os.path.dirname(dirname))
     except OSError as e:
         if e.errno != errno.EEXIST:
             raise
 
+    return dirname
 
 def del_folder(folder, sub=False): 
     """Deletes a folder. Option sub to make recursive"""
@@ -192,3 +318,18 @@ def File_Aligner(files, dates, date_range, file_size_min=0):
 			
 	return np.array(File_Loc, dtype='S256'), np.array(File_Date, dtype=object)
 	
+def urllib_authentication(url, username, password, library='urllib2'):
+	"""
+	When using urllib2 on websites which require authentication. This
+	function can be used to access the website
+	"""
+	
+	p = urllib2.HTTPPasswordMgrWithDefaultRealm()
+
+	p.add_password(None, url, username, password)
+
+	handler = urllib2.HTTPBasicAuthHandler(p)
+	opener = urllib2.build_opener(handler)
+	urllib2.install_opener(opener)
+	
+	return

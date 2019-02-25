@@ -1,6 +1,9 @@
+from __future__ import print_function, division
 import numpy as np
 import sys, warnings
 import time as systime
+
+from .system import isarray, isnumeric
 
 class array:
 	"""Fastest method of combining data for very large dataset. Much faster than
@@ -211,7 +214,8 @@ def midpoint(array):
 	diff = np.diff(array)/2
 	
 	#Add difference between each element onto original array and taken into account boundaries
-	return np.hstack((array[0]-diff[0], array[1]-diff[1], array[1:] + diff))
+	#return np.hstack((array[0]-diff[0], array[1]-diff[1], array[1:] + diff))
+	return np.hstack((array[0]-diff[0], array[:-1] + diff, array[-1] + diff[-1]))
 		
 def mask(haystack, needle, invert=False, impose=False, cross_impose=False, sort=False, find_all=False, approx=False):
 	"""Determines the all the needles in the haystack. Both haystack and needle
@@ -274,7 +278,7 @@ def mask(haystack, needle, invert=False, impose=False, cross_impose=False, sort=
 		mask_invert = np.ones(haystack.size, dtype=np.bool)
 		mask_invert[idx] = 0
 		idx = np.arange(haystack.size)[mask_invert]
-	
+
 	if impose is not False and cross_impose is False:
 		haystack_copy = haystack.copy()
 		haystack_copy[idx] = impose
@@ -289,8 +293,8 @@ def mask(haystack, needle, invert=False, impose=False, cross_impose=False, sort=
 		idx_anti = np.arange(haystack.size)[mask_invert]
 
 		haystack_copy = haystack.copy()
-		haystack_copy[idx] = impose
-		haystack_copy[idx_anti] = cross_impose
+		haystack_copy.flat[idx] = impose
+		haystack_copy.flat[idx_anti] = cross_impose
 		
 		return haystack_copy
 	else:	
@@ -403,6 +407,44 @@ def floor(a, clip=1):
 
 	return np.floor(float(a) / clip) * clip	
 
+def truncate(a, floor=True):
+	"""
+	truncates a to the nearest order of magnitude.
+	
+	Parameters
+	----------
+	a : numerical
+		A single numerical value to truncate
+	floor : boolean, optional, default is True
+		Specifiy whether to floor the result (True) or to ceiling the 
+		result (False). See examples for use.
+	
+	Examples
+	--------
+	>>> a = 0.0004334454
+	>>> gu.truncate(a)
+	0.0001
+	
+	>>> a = 9567.34
+	>>> gu.truncate(a)
+	1000
+	>>> gu.truncate(a, floor=False)
+	10000
+	
+	"""
+	
+	# Error check
+	if not isnumeric(a): 
+		raise ValueError("truncate requires a single numerical value")
+	
+	# Truncate the input numeric
+	if floor:
+		return 10**int(('%e' % a)[-3:])
+	elif not floor:
+		return 10**int(('%e' % a)[-3:]) * 10
+	else:
+		raise ValueError("floor must be a boolean. See docstring for info.")
+
 def bool2int(bool, keepfalse=False, falseval=0):
 	"""Converts a boolean array into the integer counterparts. So for every True value, the
 	element will be returned as an array ready for indexing. 
@@ -497,7 +539,7 @@ def contiguous(x, min=1, invalid=None, bounds=False):
 	
 	e.g. [0,0,0,0,1,1,1,1,0,0,0,0,2,2,2,2] 
 	
-	where 0 is not a valid data location and 1/2 are unique areas
+	where 0 is not a valid data location and 1,2 are unique areas
 	
 	Parameters
 	----------
@@ -521,7 +563,7 @@ def contiguous(x, min=1, invalid=None, bounds=False):
 			if np.isfinite(x[j]):
 				Temp_Mask += 1
 				Ind_Mask += (j,)
-				x_mask[[Ind_Mask]] = Temp_Mask
+				x_mask[(Ind_Mask,)] = Temp_Mask
 			else:
 				Temp_Mask = 0
 				Ind_Mask = ()
@@ -530,7 +572,7 @@ def contiguous(x, min=1, invalid=None, bounds=False):
 			if x[j] != invalid:
 				Temp_Mask += 1
 				Ind_Mask += (j,)
-				x_mask[[Ind_Mask]] = Temp_Mask
+				x_mask[(Ind_Mask,)] = Temp_Mask
 			else:
 				Temp_Mask = 0
 				Ind_Mask = ()		
@@ -543,7 +585,9 @@ def contiguous(x, min=1, invalid=None, bounds=False):
 	
 	#Check to see if cloud exists along day boundary. If so we add in manual time boundaries
 	if x_mask[0] != 0: x_bounds = np.insert(x_bounds, 0, 0)
-	if x_mask[-1] != 0: x_bounds = np.append(x_bounds, x_mask.size-1); 
+	if x_mask[-1] != 0: x_bounds = np.append(x_bounds, x_mask.size); 
+	#if x_mask[-1] != 0: x_bounds = np.append(x_bounds, x_mask.size-1); 
+	#if x_mask[-1] != 0: x_bounds = np.append(x_bounds, Temp_Mask); 
 	x_bounds = x_bounds.reshape(int(x_bounds.size/2),2)
 
 	#Give each cloud a unique integer for each time step 
@@ -638,6 +682,29 @@ def nearcontiguous(x, min=1, min_spacing=2, invalid=None, bounds=False):
 		val += 1
 	
 	return index, x_output
+
+def argcontiguous(x, min=1, valid=None, bounds=False):
+	"""Creates the anti array of contiguous"""
+	
+	#First get the mask from contiguous
+	mask = contiguous(x, min=min, invalid=valid, bounds=False)
+	
+	#Next, convert mask to floats (incase valid is nan or inf)
+	mask = mask.astype(np.float64)
+	
+	#Check if valid parameter is the same as non values in mask
+	if valid == 0: 
+		mask[mask == 0] = -1
+		check = -1
+	else:
+		check = 0
+	
+	#Make all true values in mask valid
+	mask[mask != check] = valid
+	mask[mask == check] = 1
+	
+	#Return the anticontiguous
+	return contiguous(mask, min=min, invalid=valid, bounds=bounds)
 	
 def indexswap(arr, ind, swaparr):
 	"""Swaps index array that are linked with arr, to a different array, swaparr"""
@@ -718,6 +785,10 @@ def broadcast(array, window, step=1, undersample=False):  # Window len = L, Stri
 	any undersampled array with np.nan. NOTE TO SELF: why did we not do this originally?
 	"""
 	
+	#Check is step if an int or float
+	if isinstance(step, float): step = int(step)
+	if not isinstance(step, int): step = 1
+		
 	if undersample is False:
 		
 		nrows = ((array.size-window)//step)+1
@@ -785,6 +856,10 @@ def stride(array1, window, step=1, undersample=False): # Window len = L, Stride 
 	https://stackoverflow.com/questions/40084931/taking-subarrays-from-numpy-array-with-given-stride-stepsize/40085052#40085052
 	
 	"""
+	
+	#Check is step if an int or float
+	if isinstance(step, float): step = int(step)
+	if not isinstance(step, int): step = 1
 	
 	nrows = ((array1.size-window)//step)+1
 	n = array1.strides[0]
@@ -942,3 +1017,221 @@ def unpack(*arg):
 	unpack(*arg) for row unpacking."""
 	
 	return arg
+
+def fix_unicode(data, encoding='utf-8'):
+	"""Fixes strings with unicode parts (e.g. u'hello' --> 'hello')
+	
+	Reference
+	---------
+	https://stackoverflow.com/a/18273297/8765762
+	"""
+	
+	if isinstance(data, unicode):
+		return data.encode(encoding)
+	elif isinstance(data, dict):
+		data = dict((fix_unicode(k), fix_unicode(data[k])) for k in data)
+	elif isinstance(data, list):
+		for i in xrange(0, len(data)):
+			data[i] = fix_unicode(data[i])
+	return data
+	
+def fix_dtypes(dtype):
+	"""Fixes an issue with pandas when using pd.DataFrame.to_records which will
+	return a np.recarray with unicode dtypes. The unicode dtypes are
+	incompatible with numpy so an manipulation of the record array thereforth
+	is extremely difficult
+	
+	Reference
+	---------
+	https://stackoverflow.com/a/18273297/8765762
+	https://stackoverflow.com/a/11108384/8765762
+	
+	"""
+	
+	#First, need to convert [(,),(,)] into [[],[]] structure
+	dtype = [list(line) for line in dtype]
+	
+	#Second, using fix_unicode, remove all unicode parts in string (e.g. u'hello' --> 'hello')
+	return [tuple(line) for line in fix_unicode(dtype)]
+	
+def fix_recarray(recarray):
+	"""Building upon fix_dtypes, this function will convert a corrupted np.recarray with incorrect
+	dtypes (e.g. [(u'f0', '<f8'), (u'f0', '<f8')] to [('f0', '<f8'), ('f0', '<f8')]"""
+	
+	return recarray.astype(fix_dtypes(recarray.dtype.descr))
+	
+def rec_append(recarray, data, dtype):
+	"""Adds colomn to np.recarry. This function allows multiple coloumns to be
+	addition on one line.
+	
+	Examples
+	--------
+	>>> #Add one coloumn to record array with float64 ('<f8') dtype
+	>>> self.data = gu.rec_append(self.data, data=PLL, dtype=[('PLL', '<f8')])
+	
+	>>> #Add multiple coloumns to record array-value
+	>>> self.data = gu.rec_append(self.data, data=[dfdt, np.abs(SLWC), z_run, f_run], dtype=[('dfdt', '<f8'),('SLWC','<f8'),('z_run','<f8'),('f_run','<f8')])
+	"""
+	
+	#Create new record array with new dtypes appended to end.
+	new_dt = np.dtype(fix_dtypes(recarray.dtype.descr) + dtype)
+	temp_array = np.zeros(recarray.shape, dtype=new_dt)
+	
+	#Add previous data to new record array
+	for name in recarray.dtype.names: temp_array[name] = recarray[name]
+	
+	#Add new data to record array
+	if len(dtype) > 1:
+		for name, dat in zip(np.array(dtype)[:,0], data): 
+			temp_array[name] = dat
+	else:
+		temp_array[dtype[0][0]] = data
+		
+	return temp_array
+	
+def string_checker(strings, test_strings, condition='all'):
+	"""Tests whether any strings are inside other strings!
+	
+	References
+	----------
+	https://stackoverflow.com/a/3389611/8765762
+	"""
+	
+	if isinstance(strings, str):
+		strings = [strings]
+	elif isarray(strings):
+		if len(strings) == 0:
+			return False
+	else:
+		raise ValueError("[gu.string_checker] Incorrect data type")
+	try:
+		return getattr(np, condition)([[x in strs for x in test_strings] for strs in strings], axis=1)
+	except ValueError:
+		warnings.warn("[gu.string_checker] We got a ValueError. Most likely because strings has length 0. We'll let you off this once")
+		
+def dict2array(dic):
+    """
+    Creates a numpy record array from a python dictionary no matter
+    how nested the dictionary is.
+    
+    N.B. Dictionary needs to be structured with same length for each
+    keys
+    
+    N.B. Each key must have a numpy array embedded inside.
+    
+    References
+    ----------
+    https://stackoverflow.com/a/32336904
+    """
+
+    def _mkdt(dic):
+        """
+        Detemines dtypes from dictionary with numpy arrays
+        """
+
+        ll = []
+        if isinstance(dic, dict):
+            for k, v in dic.items():
+                if isinstance(v, np.ndarray):
+                    ll.append((k, v.dtype))
+                else:
+                    ll.append((k, _mkdt(v)))
+        return ll
+
+    def _mkshape(dic):
+        """
+        Detemines shape from dictionary with numpy arrays
+        """
+
+        ll = []
+        if isinstance(dic, dict):
+            for k, v in dic.items():
+                print(k, v, end="\n\n")
+                if isinstance(v, np.ndarray):
+                    ll.append((v.shape[0]))
+                else:
+                    ll.append((_mkshape(v)))
+        print("ll", ll)
+        return np.hstack(np.array(ll).flat)
+
+    def _copy_values(dic, arr):
+        """
+        Copy nested values from dic to arr
+        """
+
+        if arr.dtype.names:
+            for n in arr.dtype.names:
+                copy_values(dic[n], arr[n])
+        else:
+            arr[:] = dic
+
+    #Get shape of dictionary
+    shape = _mkshape(dic)
+    print("shape", shape)
+    #Create blank record array with same shape as dic
+    arr = np.zeros(shape, _mkdt(dic))
+
+    #Fill in array with values from dict
+    _copy_values(dic, arr)
+
+    return arr
+
+def array2recarray(data, names, formats):
+	"""
+	Creates a record array from a series of numpy arrays
+	
+	Example
+	-------
+	>>> a = np.linspace(-100,20,200)
+	>>> b = np.full(200,100)
+	>>> gu.array2recarray((a,b), names='RH, Tdry', formats='f8, f8')
+	
+	Reference
+	---------
+	https://stackoverflow.com/a/5204280/8765762
+	"""
+	
+	return np.core.records.fromarrays(data, names=names, formats=formats)
+	
+def padbool(mask, padwidth):
+	"""
+	Pads the True elements in mask with a length defined by padwidth.
+	
+	Example
+	-------
+	>>> mask = np.array([False, False, True, False, False], dtype=bool)
+	>>> gu.padbool(mask, (1,1))
+	[False True True True False]
+	
+	Parameters
+	----------
+	mask : array_like
+		An array_like object which contains only True or False values
+	padwidth : array_like or int
+		An array_like specifying the number of elements to pad around
+		any True elements with has the format (<left_pad>, <right_pad>)
+		
+		e.g. padwidth = (1,1) will pad 1 element around each True value
+		found.
+		
+	"""
+	
+	# Ensure mask is ndarray
+	mask = np.array(mask, dtype=bool)
+	
+	# Ensure padwidth is in a consistent format
+	if isinstance(padwidth, int) or isinstance(padwidth, float):
+		padwidth = (int(padwidth), int(padwidth))
+	
+	# Convert 
+	for elem in bool2int(mask == True):
+		mask[elem - padwidth[0]:elem + padwidth[1] + 1] = True
+		
+	return mask
+	
+def flip(array):
+	"""
+	Reverses direction of array
+	"""
+		
+	return array[::-1]

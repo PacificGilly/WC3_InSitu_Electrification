@@ -62,8 +62,7 @@ def antifinite(x, andxor=True, unpack=False, sortby=False):
 	"""
 	
 	#For 1D arrays
-	
-	if len(np.shape(x)) == 1:
+	if len(np.shape(x)) == 1 and np.array(x).dtype != 'O':
 		
 		#Check array does not contain datetime function. If so convert to number temporarily
 		x, check, dtype = dt2hours(x, epoch=np.datetime64("1900-01-01"), checkback=True)
@@ -127,7 +126,10 @@ def antifinite(x, andxor=True, unpack=False, sortby=False):
 	for i in xrange(len(x)):
 		out_data[i] = x_nonan[:,i].astype(np.float64).astype(array_dtype[i])
 	
-	return out_data	
+	if unpack is True:
+		return out_data	
+	else:
+		return np.vstack(out_data)
 		
 	# #Convert arrays that contained datetimes
 	# if not np.all(array_dtype == array_dtype[0]): x_nonan = x_nonan.astype(object)
@@ -301,8 +303,9 @@ def antinat(x, andxor=True, unpack=False, sortby=False):
 	if unpack == True:
 		return flatten(np.split(x_noinf.T, x.shape[0]))
 	else:
-		return x_noinf			
-		
+		#return x_noinf			
+		return x_noinf.T		
+
 def antiinf(x, andxor=True, unpack=False, sortby=False):
 	"""This will remove the np.inf values by removing rows which contain them.
 	
@@ -389,7 +392,7 @@ def antiinf(x, andxor=True, unpack=False, sortby=False):
 	if unpack == True:
 		return flatten(np.split(x_noinf.T, x.shape[0]))
 	else:
-		return x_noinf	
+		return x_noinf.T
 
 def antival(x, val, andxor=True, unpack=False, sortby=False):
 	"""This will remove the np.inf values by removing rows which contain them.

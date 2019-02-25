@@ -2,10 +2,14 @@ from __future__ import absolute_import, division, print_function
 import time, os, warnings
 import numpy as np
 from datetime import datetime
+import matplotlib
 import matplotlib.backends
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
 from matplotlib.dates import DateFormatter, MinuteLocator, HourLocator, DayLocator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+from .system import isarray
 
 def colorbar(mappable, loc="right", size="5%", pad=0.05):
 	"""Fixes location of colour bar to the mappable plot
@@ -258,11 +262,16 @@ def backend_checker(show_supported=False, show_valid=False):
 	for backend, fps in zip(backends_available, backends_fps):
 		print("%s       \t%.4f" % (backend, fps))
 
-def fixed_aspect_ratio(plt=None, ax=None, ratio=1):
+def fixed_aspect_ratio(plt=None, ax=None, ratio=1, adjustable=None):
 	"""Set a fixed aspect ratio on Matplotlib plots 
 	regardless of axis units
 	
 	*** BEST FUNCTION ***
+	
+	Notes
+	-----
+	This function must be called after all plotting has been completed.
+	i.e. just before plt.savefig.
 	
 	Reference
 	---------
@@ -272,41 +281,44 @@ def fixed_aspect_ratio(plt=None, ax=None, ratio=1):
 	if plt is None and ax is None: raise SyntaxError("[gu.fixed_aspect_ratio]: Must specify either plt or ax plots.")
 	if plt is not None and ax is not None: raise SyntaxError("[gu.fixed_aspect_ratio]: Can only specify either plt or ax, not both.")
 	
-	if plt is not None:
-		#Get axis limits
-		xvals, yvals = (gca().axes.get_xlim(), gca().axes.get_ylim())
+	with warnings.catch_warnings():
+		warnings.simplefilter("ignore")
 		
-		#Compute axis range
-		xrange = xvals[1]-xvals[0]
-		yrange = yvals[1]-yvals[0]
-		
-		#Force aspect
-		gca().set_aspect(ratio*(xrange/yrange), adjustable='box')
-		
-	elif ax is not None:
-		if isinstance(ax,np.ndarray):
-			ax = ax.ravel()
-			
-			for subplot in ax:
-				#Get axis limits
-				xvals, yvals = (subplot.get_xlim(), subplot.get_ylim())
-				
-				#Compute axis range
-				xrange = xvals[1]-xvals[0]
-				yrange = yvals[1]-yvals[0]
-				
-				#Force aspect
-				subplot.set_aspect(ratio*(xrange/yrange), adjustable='datalim')
-		else:
+		if plt is not None:
 			#Get axis limits
-			xvals, yvals = (ax.get_xlim(), ax.get_ylim())
+			xvals, yvals = (gca().axes.get_xlim(), gca().axes.get_ylim())
 			
 			#Compute axis range
 			xrange = xvals[1]-xvals[0]
 			yrange = yvals[1]-yvals[0]
 			
 			#Force aspect
-			ax.set_aspect(ratio*(xrange/yrange), adjustable='datalim')
+			gca().set_aspect(ratio*(xrange/yrange), adjustable=adjustable)
+					
+		elif ax is not None:
+			if isinstance(ax,np.ndarray):
+				ax = ax.ravel()
+				
+				for subplot in ax:
+					#Get axis limits
+					xvals, yvals = (subplot.get_xlim(), subplot.get_ylim())
+					
+					#Compute axis range
+					xrange = xvals[1]-xvals[0]
+					yrange = yvals[1]-yvals[0]
+					
+					#Force aspect
+					subplot.set_aspect(ratio*(xrange/yrange), adjustable=adjustable)
+			else:
+				#Get axis limits
+				xvals, yvals = (ax.get_xlim(), ax.get_ylim())
+				
+				#Compute axis range
+				xrange = xvals[1]-xvals[0]
+				yrange = yvals[1]-yvals[0]
+
+				#Force aspect
+				ax.set_aspect(ratio*(xrange/yrange), adjustable=adjustable)
 	
 	return	
 			
@@ -356,3 +368,122 @@ def fake_colorbar():
 	im = plt.contourf(Z, levels)
 	
 	return im
+	
+def hide_axis(plt=None, ax=None, x_or_y=None, remove_gridlines=False):
+	"""
+	Removes axis of a Matplotlib plot.
+	
+	Parameters
+	----------
+	plt : matplotlib figure
+		The figure to modify. N.B. Either plt or ax can be specified,
+		not both.
+	ax : matplotlib axis
+		The axis to modify. N.B. Either plt or ax can be specified,
+		not both.
+	x_or_y : str
+		The x or y coordinates to modify.
+	remove_gridlines : bool, optional, default = False
+		Specify whether to fully hide the x or y axis. If set to False 
+		then just the tick labels are hidden and not the ticks 
+		themselves.
+	
+	References
+	----------
+	Stackoverflow : Hiding axis text in matplotlib plots
+	"""
+	
+	if plt is None and ax is None: raise ValueError("[gu.hide_axis]: Must specify either plt or ax plots.")
+	if plt is not None and ax is not None: raise ValueError("[gu.hide_axis]: Can only specify either plt or ax, not both.")
+	if x_or_y is None: raise ValueError("[gu.hide_axis]: x_or_y only takes either 'x' or 'y'.")
+	
+	if plt is not None: ax = plt.gca()
+	
+	if x_or_y == 'x':
+		if remove_gridlines is True:
+			ax.axes.get_xaxis().set_ticks([])
+		elif remove_gridlines is False:
+			ax.axes.get_xaxis().set_ticklabels([])
+		else:
+			raise ValueError("remove_gridlines is a boolean parameter and accepts either True or False")
+	elif x_or_y == 'y':
+		if remove_gridlines is True:
+			ax.axes.get_yaxis().set_ticks([])
+		elif remove_gridlines is False:
+			ax.axes.get_yaxis().set_ticklabels([])
+		else:
+			raise ValueError("remove_gridlines is a boolean parameter and accepts either True or False")
+	else:
+		raise ValueError("x_or_y only takes either 'x' or 'y'.")
+		
+	return
+
+def time_axis(date_range, plt=None, ax=None, format='auto', xlabel=None, rotation=None):
+	"""
+	Sets up the x axis using datetime information.
+	
+	Parameters
+	
+	"""
+	
+	# Error check input parameters
+	if plt is None and ax is None: 
+		raise ValueError("[gu.time_axis]: Must specify either plt or ax plots.")
+	if plt is not None and ax is not None: 
+		raise ValueError("[gu.time_axis]: Can only specify either plt or ax, not both.")
+	if (format != 'auto') ^ isinstance(format, int):
+		raise ValueError("[gu.time_axis]: format must be either 'auto' or an integer.")
+	if not isarray(date_range):
+		raise ValueError("[gu.time_axis]: date_range must be array_like containing two python datetime objects")
+	if not isinstance(date_range[0], datetime) or not isinstance(date_range[1], datetime):
+		raise ValueError("[gu.time_axis]: date_range must contain two python datetime objects stating the start and end dates for plotting")
+	if len(date_range) != 2:
+		raise ValueError("[gu.time_axis]: date_range must have a length of 2. To clarify, date_range must be array_like of length 2 containing python datetime objects which state the start and end times for plotting")
+		
+	if plt is not None:
+		ax = plt.gca()
+	
+	with warnings.catch_warnings():
+		warnings.simplefilter("ignore")
+		
+		# If auto has been set for format
+		if format == 'auto':
+		
+			# Calculate the time length in seconds between datetimes
+			time_length = (date_range[1] - date_range[0]).total_seconds() + 1
+			
+			# Specify different tick requirements dependent on the number of seconds between datetimes
+			if time_length/86400 <= 2:
+				# Short Range: ~Single Day
+				myFmt = DateFormatter('%H:%M')
+				ax.xaxis.set_major_formatter(myFmt)
+				ax.xaxis.set_major_locator(MinuteLocator(interval=int(np.floor((time_length/60)/6))))
+			elif time_length/86400 <= 7:
+				# Medium Range: ~Multiple Days
+				myFmt = DateFormatter('%Y-%m-%d %H:%M')
+				ax.xaxis.set_major_formatter(myFmt)
+				ax.xaxis.set_major_locator(HourLocator(interval=int(round((time_length/3600)/6))))
+			else:
+				# Long Range: ~Months
+				myFmt = DateFormatter('%Y-%m-%d')
+				ax.xaxis.set_major_formatter(myFmt)
+				ax.xaxis.set_major_locator(DayLocator(interval=int(round((time_length/86400)/6))))
+			
+			if xlabel is None:
+				ax.set_xlabel('Time (UTC) between ' + date_range[0].strftime('%d/%m/%Y %H:%M:%S') + " and " + date_range[1].strftime('%d/%m/%Y %H:%M:%S'))
+			elif xlabel is not False:
+				ax.set_xlabel(xlabel)
+				
+		# If format is not set to 'auto'
+		else:
+			ax.xaxis.set_major_locator(MultipleLocator(format))
+			ax.set_xlabel('Time (UTC)')
+	
+	# Rotate the ticks as specified by rotation parameter
+	if rotation is not None:
+		for tick in ax.get_xticklabels():
+			tick.set_rotation(rotation)
+	
+	# Need to draw figure before xtickslabels are populated
+	matplotlib.pyplot.draw()
+	return [item._text for item in ax.get_xticklabels()]

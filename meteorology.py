@@ -4,7 +4,7 @@ import sys, warnings
 from datetime import datetime
 
 from .datetime64 import dt2hours, hours2dt
-from .manipulation import bool2int, argnear, searchsorted
+from .manipulation import bool2int, argnear, searchsorted, contiguous
 from .plotting import backend_changer
 
 import matplotlib.pyplot as plt 
@@ -342,7 +342,7 @@ def degK2degC(Kelvin):
 	else:
 		sys.exit("[ERROR in degK2degC] Kelvin needs to be either a list, ndarray or float")
 		
-def radarbounds(Radar_Time, Radar_Height, Radar_Mag, Radar_TimeBounds, Lidar_TimeBounds, Cloud_Base):
+def radarbounds(Radar_Time, Radar_Height, Radar_Mag, Radar_TimeBounds, Lidar_TimeBounds, Cloud_Base, Lidar_Time):
 	"""Determines the cloud boundaries within a radar image. Requires all 3 dimensions of
 	a radar image (e.g. time, height, magnitude), the index values denoting the boundaries
 	of each cloud (in a 2D array) and the cloud base height array (1D) and must have the
@@ -376,6 +376,7 @@ def radarbounds(Radar_Time, Radar_Height, Radar_Mag, Radar_TimeBounds, Lidar_Tim
 		ClearSkies = np.sum(np.isnan(Cloud_Mag),axis=1)
 		
 		#[Step 3] Find lowest cloud base layer
+		print(Lidar_Time[lidar_timebounds], np.sort(Cloud_Base[lidar_timebounds[0]:lidar_timebounds[1]]))
 		CloudBaseMin = np.min(Cloud_Base[lidar_timebounds[0]:lidar_timebounds[1]])
 		CloudBaseMax = np.max(Cloud_Base[lidar_timebounds[0]:lidar_timebounds[1]])
 		CloudBase90	 = np.nanpercentile(Cloud_Base[lidar_timebounds[0]:lidar_timebounds[1]], 10)
@@ -426,3 +427,166 @@ def radarbounds(Radar_Time, Radar_Height, Radar_Mag, Radar_TimeBounds, Lidar_Tim
 		output = (Cloud_HeightBounds, Radar_Mag)
 	
 	return output
+	
+def cloud_identifer_ascent(height, rh_ice, method='Zhang', verbose=False):
+	"""
+	Calculates the cloud and moist layers within a radiosonde ascent 
+	profile. Available methods are:
+	
+	1) Zhang et al. (2010)
+	
+	Parameters
+	----------
+	
+	Returns
+	-------
+	Cloud_ID : ndarray, dtype = np.int8
+		An array with the same size of the input data (e.g. 'height')
+		which contains the identifier for each cloud. Starting with
+		1, for all height positions where a cloud was identified a 1
+		will be used to identify the first cloud for all height 
+		positions. Sequentially, the next cloud identified will be
+		marked by a 2. N.B. The moist layer clouds are not identified
+		within this array.
+	Layer_Type : ndarray, dtype = np.int8
+		An array with the same size of the input data (e.g. 'height')
+		which contains the layer type at each height level (see notes
+		for layer type classification). This is very similar to 
+		Cloud_ID but does not differentiate between cloud layers.
+	
+	Notes
+	-----
+	Layer Type : Classification
+		0 = Clear Air, 
+		1 = Moist Layer, 
+		2 = Cloud Layer.
+			
+	References
+	----------
+	Zhang, J., H. Chen, Z. Li, X. Fan, L. Peng, Y. Yu, and M. Cribb 
+		(2010). Analysis of cloud layer structure in Shouxian, China
+		using RS92 radiosonde aided by 95 GHz cloud radar. J. 
+		Geophys. Res., 115, D00K30, doi: 10.1029/2010JD014030.
+	WMO, 2017. Clouds. In: Internal Cloud Atlas Manual on the 
+		Observation of Clouds and Other Meteors. Hong Kong: WMO, 
+		Section 2.2.1.2.
+	"""
+	
+	# Create Height-Resolving RH Thresholds (see Table 1 in 
+	# Zhang et al. (2010)). N.B. use np.interp(val, 
+	# RH_Thresholds['altitude'], RH_Thresholds['*RH']) where 
+	# val is the height range you want the RH Threshold .
+	RH_Thresholds = {'minRH' : [0.92, 0.90, 0.88, 0.75, 0.75],
+		'maxRH' : [0.95, 0.93, 0.90, 0.80, 0.80],
+		'interRH' : [0.84, 0.82, 0.78, 0.70, 0.70],
+		'altitude' : [0, 2, 6, 12, 20]}
+
+	# Define the cloud height levels (km) as defined by WMO (2017).
+	Z_Levels = {'low' : [0,2], 'middle' : [2,7], 'high' : [5,13]}
+
+	# Define the types of layers that can be detected.
+	Cloud_Types = {0 : 'Clear Air', 1 : 'Moist (Not Cloud)', 2 : 'Cloud'}
+
+	# Define the min, max and interRH for all measure altitudes
+	minRH = np.interp(height, 
+					  RH_Thresholds['altitude'], 
+					  RH_Thresholds['minRH'], 
+					  left=np.nan, 
+					  right=np.nan)*100
+	maxRH = np.interp(height, 
+					  RH_Thresholds['altitude'], 
+					  RH_Thresholds['maxRH'], 
+					  left=np.nan, 
+					  right=np.nan)*100
+	interRH = np.interp(height, 
+						RH_Thresholds['altitude'], 
+						RH_Thresholds['interRH'], 
+						left=np.nan, 
+						right=np.nan)*100
+
+	# [Step 1]: The base of the lowest moist layer is determined
+	# as the level when RH exceeds the min-RH corresponding to
+	# this level. N.B. Catch simple warnings required because of
+	# np.nan values in either RH or minRH arrays. Can't remove
+	# them due to mask not having correct size and masking the
+	# invalid values still throws a warning message.
+	with warnings.catch_warnings():
+		warnings.simplefilter("ignore")
+
+		minRH_mask = (rh_ice > minRH)
+
+	# [Step 2 and 3]: Above the base of the moist layer, 
+	# contiguous levels with RH over the corresponding min-RH 
+	# are treated as the same layer.
+	height[~minRH_mask] = np.nan
+	Clouds_ID = contiguous(height, 1)
+
+	# [Step 4]: Moist layers with bases lower than 120m and 
+	# thickness's less than 400m are discarded.
+	for Cloud in np.unique(Clouds_ID)[1:]:
+		if height[Clouds_ID == Cloud][0] < 0.12:
+			if height[Clouds_ID == Cloud][-1] - height[Clouds_ID == Cloud][0] < 0.4:
+				Clouds_ID[Clouds_ID == Cloud] = 0
+
+	# [Step 5]: The moist layer is classified as a cloud layer 
+	# is the maximum RH within this layer is greater than the 
+	# corresponding max-RH at the base of this moist layer.
+	LayerType = np.zeros(height.size, dtype=int) # 0: Clear Air, 1: Moist Layer, 2: Cloud Layer
+	for Cloud in np.unique(Clouds_ID)[1:]:
+		if np.any(rh_ice[Clouds_ID == Cloud] > maxRH[Clouds_ID == Cloud][0]):
+			LayerType[Clouds_ID == Cloud] = 2
+		else:
+			LayerType[Clouds_ID == Cloud] = 1
+
+	# [Step 6]: The base of the cloud layers is set to 280m AGL, 
+	# and cloud layers are discarded if their tops are lower 
+	# than 280m	
+	for Cloud in np.unique(Clouds_ID)[1:]:
+		if height[Clouds_ID == Cloud][-1] < 0.280:
+			Clouds_ID[Clouds_ID == Cloud] = 0
+			LayerType[Clouds_ID == Cloud] = 0
+
+	# [Step 7]: Two contiguous layers are considered as one-
+	# layer cloud if the distance between these two layers is
+	# less than 300m or the minimum RH within this distance is
+	# more than the maximum inter-RG value within this distance
+	for Cloud_Below, Cloud_Above in zip(np.unique(Clouds_ID)[1:-1], np.unique(Clouds_ID)[2:]):
+		
+		#Define the index between clouds of interest
+		Air_Between = np.arange(bool2int(Clouds_ID == Cloud_Below)[-1], bool2int(Clouds_ID == Cloud_Above)[0])
+		
+		if ((height[Clouds_ID == Cloud_Above][0] - height[Clouds_ID == Cloud_Below][-1]) < 0.3) or (np.nanmin(rh_ice[Air_Between]) > np.nanmax(interRH[Air_Between])):
+			Joined_Cloud_Mask = np.arange(bool2int(Clouds_ID == Cloud_Below)[0], bool2int(Clouds_ID == Cloud_Above)[-1])
+			
+			#Update the cloud ID array as the Cloud_Below and Cloud_Above are not distinct clouds
+			Clouds_ID[Joined_Cloud_Mask] = Cloud_Below
+			
+			#Update the LayerType to reflect the new cloud merging
+			if np.any(LayerType[Clouds_ID == Cloud_Below] == 2) or np.any(LayerType[Clouds_ID == Cloud_Above] == 2):
+				LayerType[Joined_Cloud_Mask] = 2
+			else:
+				LayerType[Joined_Cloud_Mask] = 1
+		
+	# [Step 8] Clouds are discarded if their thickness's are less than 30.5m for low clouds and 61m for middle/high clouds
+	for Cloud in np.unique(Clouds_ID)[1:]:
+		if height[Clouds_ID == Cloud][0] < Z_Levels['low'][1]:
+			if height[Clouds_ID == Cloud][-1] - height[Clouds_ID == Cloud][0] < 0.0305:
+				Clouds_ID[Clouds_ID == Cloud] = 0
+				LayerType[Clouds_ID == Cloud] = 0
+
+		else:
+			if height[Clouds_ID == Cloud][-1] - height[Clouds_ID == Cloud][0] < 0.0610:
+				Clouds_ID[Clouds_ID == Cloud] = 0
+				LayerType[Clouds_ID == Cloud] = 0
+	
+	#Re-update numbering of each cloud identified
+	Clouds_ID = contiguous(Clouds_ID, invalid=0)
+	
+	#Output verbose to screen
+	if verbose is True:
+		print("Detected Clouds and Moist Layers\n--------------------------------")
+		for Cloud in np.unique(Clouds_ID)[1:]:
+			print("Cloud %s. Cloud Base = %.2fkm, Cloud Top = %.2fkm, Layer Type: %s" % (Cloud, height[Clouds_ID == Cloud][0], height[Clouds_ID == Cloud][-1], Cloud_Types[LayerType[Clouds_ID == Cloud][0]]))
+	
+	return Clouds_ID, LayerType
+	

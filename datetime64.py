@@ -1,8 +1,10 @@
 import numpy as np
-#import pandas as pd
+import pandas as pd
 import warnings, sys
 from datetime import date, datetime, timedelta
 from datetime import time as dttime
+
+from .system import isarray
 
 def time32(when='now', dtype='str'):
 	"""Output the time in different formats
@@ -189,16 +191,65 @@ def toDatetime(date_val):
 	else:
 		sys.exit("[Error: toDatetime] Incorrect data type")
 		
-def toDatetime64(datetime_array):
-	"""Converts datetime objects to numpy datetime64"""
+def toDatetime64(arg, format=None, dtype='datetime64[us]'):
+	"""Converts datetime objects to numpy datetime64. Useful for converting entire array to a different datetime
+	dtype.
 	
-	if isinstance(datetime_array, np.ndarray):
-		if isinstance(datetime_array[0], date):
-			return datetime_array.astype('datetime64[D]').astype('datetime64[us]')
+	Parameters
+	----------
+	arg : numpy.datetime64, datetime.datetime, or array_like
+		
+	dtype : str
+		The numpy datetime64 dtype to convert the inputs to. Available options are dtype='datetime[?]' 
+		where ? can include ['as', 'fs', 'ps', 'ns', us', 'ms', 's', 'm', 'h', 'D', 'W', 'M', 'Y'].
+		
+	Output
+	------
+	array : numpy.datetime64 or np.ndarray
+		Outputs all elements in arg either as a numpy.datetime64 or np.ndarray depending on whether the arg was
+		array_like or not. The output will have the dtype as specified using the dtype parameter."""
+	
+	#Error checking
+	if not isinstance(dtype, str): raise ValueError("[gu.toDatetime64] 'dtype' parameter was not specified correctly. \
+		We got %s. Available options are dtype='datetime[?]' where ? can include ['as', 'fs', 'ps', 'ns',\
+		us', 'ms', 's', 'm', 'h', 'D', 'W', 'M', 'Y']." % dtype)
+	if not 'datetime' in dtype: raise ValueError("[gu.toDatetime64] 'dtype' parameter was not specified correctly. \
+		We got %s. Available options are dtype='datetime[?]' where ? can include ['as', 'fs', 'ps', 'ns',\
+		us', 'ms', 's', 'm', 'h', 'D', 'W', 'M', 'Y']." % dtype)
+	
+	#if arg is array_like
+	if isarray(arg):
+		#if arg is an array, then convert to numpy
+		arg = np.asarray(arg)
+		
+		#Convert to numpy datetime64
+		if isinstance(arg[0], date):
+			return arg.astype('datetime64[D]').astype(dtype)
+		elif isinstance(arg[0], str):
+			if format is None:
+				return np.array(pd.to_datetime(arg), dtype=np.datetime64)
+			else:
+				return np.array(pd.to_datetime(arg, format=format), dtype=np.datetime64)
 		else:
-			return datetime_array.astype('datetime64[us]')
+			return arg.astype(dtype)
+	
+	#if arg is a numpy datetime64 object
+	elif np.issubdtype(arg, np.datetime64):
+		return arg.astype(dtype)
+	
+	#if arg is a datetime.datetime object
+	elif isinstance(arg, datetime):
+		return np.datetime64(arg).astype('datetime64[D]').astype(dtype)
+	
+	#if arg is a datetime.date object
+	elif isinstance(arg, date):
+		return np.datetime64(arg).astype(dtype)
+	
+	#Anything else
 	else:
-		return None
+		#return None
+		raise ValueError("[gu.toDatetime64] 'arg' parameter was not specified correctly. We got %s. arg must be \
+			array_like or either datetime.datetime, datetime.date or np.datetime64")
 	
 def roundTime(dt=None, roundTo=60):
    """Round a datetime object to any time laps in seconds
@@ -404,6 +455,10 @@ def DatetimeFormat(date, format, check=False):
 		whether to only check the format and return
 		boolean indicators."""
 	
+	if date is None: 
+		warnings.warn("[gu.DatetimeFormat] date input is None")
+		return None
+	
 	if isinstance(date, str):
 		if check is True:
 			try:
@@ -490,4 +545,45 @@ def BSTCor(time, date):
 		print(3)
 		time -= 1
 	
-	return time   
+	return time
+	
+def hour2hms(arr):
+	"""Converts an array containing fractional hours to hours, minutes and seconds in
+	integer format"""
+	
+	#Convert input array
+	arr = np.asarray(arr)
+	arr = np.atleast_1d(arr)
+	
+	#Calculate hour
+	hour = np.floor(arr).astype(int)
+	
+	#Calculate minute
+	minute = np.floor((arr - hour)*60).astype(int)
+	
+	#Calculate seconds
+	second = np.floor((arr - hour - minute/60.)*3600).astype(int)
+	
+	return np.vstack((hour, minute, second))
+	
+def addHourFrac(base_date, fractional_hours):
+	"""Adds fractional hours to a datetime64 array. This function overcomes the major limitation
+	of timedelta64 which can only accept integer values.
+	
+	Parameters
+	----------
+	base_date : np.datetime64
+		Must be a single datetime64 object or an array of datetime64 objects of same length
+		as fractional_hours.
+	fractional_hours : 1D array_like of floats
+		An array_like of floats which represent the fractional hours to be added to base_date."""
+	
+	#Convert fractional_hours to (hour, minute, second)
+	HMS = hour2hms(fractional_hours)
+	
+	#Calculate the timedelta function
+	timedelta = HMS[0].astype('timedelta64[h]') + HMS[1].astype('timedelta64[m]') + HMS[2].astype('timedelta64[s]')
+	
+	#Add timedelta function to base_date
+	return base_date + timedelta
+	

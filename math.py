@@ -44,6 +44,16 @@ def power(array, pow):
 		warnings.simplefilter("ignore")
 	
 		return sign*(np.abs(array)**pow)
+
+def interavg(arr, n, type='mean'):
+	"""Sums over n elements in an array.
+	
+	Reference
+	---------
+	https://stackoverflow.com/a/15956341/8765762
+	"""
+	
+	return getattr(np, type)(arr.reshape(-1, n), axis=1)
 	
 def isprime(a):
     return all(a % i for i in xrange(2, a))
