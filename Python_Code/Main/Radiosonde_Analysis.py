@@ -5,7 +5,7 @@ __title__ = "Plotting Radiosonde Data"
 __author__ = "James Gilmore"
 __email__ = "james.gilmore@pgr.reading.ac.uk"
 __version__ = "1.13"
-__date__ = "16/02/2019"
+__date__ = "25/02/2019"
 __status__ = "Stable"
 __changelog__ = "Added in Case Study sections"
 
