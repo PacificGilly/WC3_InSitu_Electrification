@@ -1,0 +1,260 @@
+' OSCadj
+' NO SHUTDOWN VERSION - EFFECT OF PIN4 DISABLED
+' ver 5 - symmetrised duty cycle and frequency set by selecting constants:
+'
+' CON 909 - 1.1kHz  Period = 909uS             
+' CON 833 - 1.2kHz  Period = 833uS             
+' CON 714 - 1.4kHz  Period = 714uS             
+' CON 667 - 1.5kHz  Period = 667uS             
+
+' GP3 held high for (default) oscillation, taken low to switch off LED drive
+
+' RGH 02/06/17
+' Version B2 - LED outputs set to all go high so LED turns off
+' minimal (1Hz?) shift in PD drive frequency
+
+' RGH 31/05/17
+' version B -- shuts down drive to LED but keeps PD running
+' slight shift of PD drive up ~ 5Hz during shutdown
+
+' RGH 30/05/17
+' includes software control of oscillator via pin4 (GP3)
+
+' based on OScadj10P -  tunable frequency and duty cycle ~1kHz oscillator using 12F675
+' allows variable phase delay with demodulating pulses too
+' multiple output pins 5,6,7 switched together so they can be paralleled for extra current
+
+' uses internal 4MHz oscillator to generate timer1 interrupts at 1MHz
+' each counted pulse is 1 microsecond
+' generated frequency is determined by starting value of timer1
+' which counts up to 65535 and then generates the timer1 interrupt
+
+' on time values are defined by low byte and high byte SL1 and SH1
+' off time values are defined by low byte and high byte SL2 and SH2
+
+' default values for SH1,SL1,SH2,SL2 are assumed, 
+
+' example values
+' SH1 SL1 SH2 SL2 ontime(us) offtime(us) duty cycle (%) freq(Hz) period (us)
+'254	130	254	130	403	386	51.1	1267.4	789
+'254	130	254	140	403	373	52.0	1288.7	776
+'254	130	254	150	403	365	52.5	1302.1	768
+'254	130	254	160	403	360	52.8	1310.6	763
+'254	130	254	250	403	270	59.9	1485.9	673
+'254	130	254	1	403	502	44.5	1105.0	905
+'253	130	254	1	403	744	35.1	871.8	1147
+'254	100	254	31	431	477	47.5	1101.3	908
+
+
+' NB PROGRAMMING CONFIGURATION - MCRL as input pin, WD timer disabled 
+' PO timer disabled, INTOSC oscillator, BROWNOUT disabled
+' Code Protect enabled
+
+
+#CONFIG
+   __config _INTRC_OSC_NOCLKOUT & _WDT_OFF & _PWRTE_OFF & _MCLRE_OFF & _BODEN_OFF & _CP_OFF & _CPD_OFF
+#ENDCONFIG
+
+INCLUDE "modedefs.bas"
+Define OSCCAL_1K 1      ' PIC12F675, Calibrate internal oscillator
+DEFINE CHAR_PACING 2000      ' spacing between serial characters (us)
+
+'OPTION_REG.7=0      ' enable all pull ups
+
+ANSEL = 0     ' Set all digital
+CMCON = 7     ' Analog comparators off
+
+' small phase lag between LED and (later) auxilary output set using assembler loops
+Ph var byte SYSTEM      ' phase lag ("20" gives ~60us)
+
+
+timer1start VAR word     '16 bit Timer 1 starting value
+tempword    VAR word
+
+
+
+' port bit settings
+S0 var byte
+S1 var byte
+S2 var byte
+S3 var byte
+
+
+
+'####################
+' set up pins
+
+TRISIO.1=0              ' make GP1 an output
+LED var GPIO.1          ' LED on GP1 (pin 6)
+
+TRISIO.3=1              ' make GP3 an input (GP3 can only be an input anyway)
+SHDN var GPIO.3           ' shutdown input line on GP3 (pin 4) (goes low to switch off)
+
+TRISIO.4=0
+SO var GPIO.4           ' serial output (SO) line on GP4 (pin 3)
+
+TRISIO.0=0              ' GP0 (pin5)
+TRISIO.1=0              ' make GP1 an output (pin6)
+TRISIO.2=0              ' GP2 (pin7)
+
+'####################
+
+' 1.1kHz  Period = 909uS             
+' 1.2kHz  Period = 833uS             
+' 1.4kHz  Period = 714uS             
+' 1.5kHz  Period = 667uS             
+
+stopstartinterval CON 14                  'approx duration of compiled code between stopping and restarting timer 1
+
+'period            CON 909           'simulation check 910
+'period            CON 833           'simulation check 834
+period            CON 714           'simulation check 716
+'period            CON 667           'simulation check 668
+
+
+'for equal high and low periods
+timer1start = $FFFF - (period/2) + stopstartinterval + 1       '2^16 - (period/2) + stopstartinterval
+Ph=32                                                          'SYNC delay about 99uS  3*(Ph+1)
+
+
+pause 100               ' gather
+
+'#################################################
+
+timing:         '''''''''''''''''''''''''''' timing part
+
+TRISIO.1=0              ' make GP1 an output (pin6)
+TRISIO.5=0              ' make GP5 an output (pin2)
+
+sig Var BIT      ' keeps track of square signal wave up or down
+
+' setup TMR1 
+T1CON.3=0            ' disable (external) LP oscillator
+T1CON.1=0            ' don't use external clock    TMR1CS
+T1CON.2=1            ' don't synchronise with external clock 
+
+T1CON.0=0            'disable timer1
+
+T1CON.4=0
+T1CON.5=0           ' set timer1 prescaler to 1:1
+                        
+' load these values in for timer1 start
+TMR1L = timer1start.byte0           
+TMR1H = timer1start.byte1
+PIR1.0 = 0    ' Reset timer1 interrupt flag    
+T1CON.0=1            ' enable timer1
+
+INTCON.7=1       ' enable all interrupts
+INTCON.6=1       ' enable all peripheral interrupts
+PIE1.0=1          'enable timer1 interrupt
+
+INTCON.4=0        ' disable this interrupt
+
+I var byte SYSTEM          ' loop counter
+
+
+On Interrupt Goto inthand
+
+
+' bit settings for standard use - both LED and osc on
+S0=7
+S1=$27
+S2=32
+S3=0
+
+
+
+' main code - infinite loop
+mainloop:
+
+If shdn=1 then ' normal operation, pull up to supply holds this
+' bit settings for standard use - both LED and PD on
+S0=7
+S1=$27
+S2=32
+S3=0
+'else 'shdn=0.. shutdown ..led drive off but PD still on
+'S0=7
+'S1=39
+'S2=39
+'S3=7
+endif
+
+
+
+Goto mainloop  
+
+
+
+' Interrupt handler for timer1 interrupt
+DISABLE INTERRUPT
+inthand:
+
+   T1CON.0=0                                 ' turn off timer1
+   tempword.byte0 = TMR1L                    'timer1 will have run on since overflow so take account of starting value
+   tempword.byte1 = TMR1H
+   tempword = tempword + timer1start
+   TMR1L = tempword.byte0
+   TMR1H = tempword.byte1
+   T1CON.0=1         ' turn on timer1        OFF to ON takes around 14 compiled instruction cycles
+
+sig = not (sig)   'flip output line
+
+' writes to GPIO by using a shadow register - this ensures that changes can only 
+' be made to all bits simultaneously as errors result if bits are changed separately
+' conditions required are
+'GPIO all off:              000000           0
+'GPIO5 on: (pin2)           100000           32 (hex 20)
+'GPIO1 on: (pin 6)          000010           2 (hex 4)
+'GPIO5 and GPIO1 on:        100010           34 (hex 22)
+' parallel pins option, pin 5,6 and 7 operated together
+'GPIO0 pin7                 
+'GPIO1 pin6
+'GPIO2 pin5
+'       all off             000000
+'       LED lines on        000111        7 (hex 7)
+'       LED and PDon        100111        39 (hex 27)
+
+
+if sig=1 then
+'    GPIO=2      ' GPIO.1 on
+'    GPIO=7      ' LEDs on    
+GPIO=S0
+  
+' assembler loop to generate delay
+I=Ph
+ASM
+INNER1
+     DECFSZ I,F   ; I=I-1. IF I=0 skip next instruction
+     GOTO INNER1  ; Loop until I=0
+ENDASM
+
+    
+'    GPIO=34     ' GPIO.1 remains on and GPIO.5 is now switched on too
+'    GPIO=$27     ' LEDs remain on and GPIO.5 switched on too    
+    GPIO=S1
+    else
+    
+'    GPIO=32     ' GPIO.1 off with GPIO.5 remaining on
+'    GPIO=32     ' LEDS off with GPIO.5 remaining on        
+    GPIO=S2
+
+' assembler loop to generate delay
+I=Ph
+ASM
+INNER2
+     DECFSZ I,F   ; I=I-1. IF I=0 skip next instruction
+     GOTO INNER2  ; Loop until I=0
+ENDASM
+
+    'GPIO=0      ' GPIO.5 now switched off as well
+    GPIO=S3
+    endif
+
+PIR1.0 = 0    ' Reset timer1 interrupt flag   
+
+Resume
+ENABLE INTERRUPT
+
+
+End

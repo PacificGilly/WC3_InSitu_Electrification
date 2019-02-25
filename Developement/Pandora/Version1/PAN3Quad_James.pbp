@@ -1,0 +1,426 @@
+' Program: PAN3Quad
+' RGH 09/01/2015
+'
+'
+' code for Pandora3 board to give reads of 5 channels from Quad cloud detector
+' for consecutive reads of analogue input channels Ch0,1,2,3,4
+' uses PIC analogue 10bit inputs with pseudo 12bit reads (4*1023 max)
+
+' digits are combined into four words to look like
+' AAAAE BBBBE CCCCE DDDDE are the 5 values sent
+' nb each of the four words sent have 10000 added to ensure the number of digits
+' which means 1000 has to be subtracted from the values found. (Ch4 has been
+' made to be consistent with this too.)
+
+' Ch0 on RA0     (AN0)
+' Ch1 on RA1     (AN1)
+' Ch2 on RC3     (AN7)
+' Ch3 on RA4     (AN3)
+' Ch4 on RC0     (AN4)
+
+' also outputs serial data (mode 2, i.e. T9600 baud, 8data No parity 1 stop bit) 
+' on LED line (intended for USB convertor) on RC5 (LED blinks as serial data output)
+
+' intended for 16F688 PIC
+' when programming, make sure MCLR (in View|Configuration) is "Input Pin"
+' and 16F688 oscillator INTOSCIO (defaults to 4MHz), defaults for everything else
+
+#CONFIG
+      __config _INTRC_OSC_NOCLKOUT & _MCLRE_OFF
+#ENDCONFIG
+
+'Define OSCCAL_1K 1      ' calibrate internal oscillator...only needed for 16F676
+
+DEFINE I2C_HOLD 1
+'DEFINE I2C_SLOW 1
+
+'##############################################
+' configure interfacing to RS92                          
+'##############################################
+TRISA.3=1         ' set RA3 as an input [MUX1]
+
+ANSEL.6=0          'make RC2 a digital i/o (rather than AN6 input)
+TRISC.2=0         ' set RC2 as an output [ShiftOut]
+
+TRISA.2=0         ' set RA2 as an output [DataOut]
+
+MUX1 		VAR PORTA.3
+Data_Out 	VAR PORTA.2
+Shift_Out 	VAR PORTC.2
+
+'##############################################
+
+
+'##############################################
+' configure internal 10 bit AtoD
+'##############################################
+ADCON0.0=1          ' internal AtoD on
+
+ADCON1.6=1          ' set AtoD clock time to Fosc/16 (101 on bits 6,5,6)
+ADCON1.5=0
+ADCON1.4=1        
+
+ADCON0.6=0          ' use VDD supply as AtoD reference voltage
+ADCON0.7=1          ' right justified
+
+                   ' Analog comparators off
+'CMCON=0             ' lines needed for 16F676
+CMCON0.0=0         ' lines needed for 16F688
+CMCON0.1=0         ' lines needed for 16F688
+CMCON0.2=0         ' lines needed for 16F688
+
+' configure analogue inputs
+TRISA.0=1           ' make RA0 operate as an input
+ANSEL.0=1           ' select analogue input mode
+
+TRISA.1=1           ' make RA1 operate as an input
+ANSEL.1=1           ' select analogue input mode
+
+TRISC.3=1           ' make RC3 operate as an input
+ANSEL.7=1
+
+TRISA.4=1           ' make RA4 operate as an input
+ANSEL.3=1
+
+TRISC.0=1           ' make RC0 operate as an input
+ANSEL.4=1
+
+'##############################################
+
+
+
+'##############################################
+' I2C connections
+'TRISC.4=0           ' RC4 an output for clock line
+'TRISC.5=1           ' RC5 an input for data line
+SCL var PORTC.4
+SDA var PORTC.5
+I2COMB con 6         ' OMB address = 3      In Arduino code = 3
+I2CSO2 con 10        ' SO2 address = 5      In slave code = 11
+I2CACC con 14        ' ACC address = 7      In slave code = 15
+I2CCHA con 18        ' CHA address = 9      In slave code = 19
+I2CGEI con 22        ' GEI address = 11     In slave code = 23  
+I2CCLO con 18        ' CLO address = 13     In slave code = 27
+I2COXF con 22        ' OXF address = 15     In slave code = 31
+'##############################################
+
+
+'##############################################
+' serial output line
+TRISA.5=0           ' make RA5 a (digital) output
+SO var PORTA.5     ' for serial output 
+'##############################################
+
+
+'##############################################
+' variables
+Ch0res	     VAR word
+Ch1res	     VAR word
+Ch2res 	     VAR word
+Ch3res 	     VAR word
+Ch4res 	     VAR word
+
+Word1 var word
+Word2 var word
+Word3 var word
+Word4 var word
+d0 var byte
+d1 var byte
+d2 var byte
+d3 var byte
+d4 var byte
+
+counter     var byte
+N           var byte        ' number of repeated 10bit AD reads
+Wtemp       var word        ' general purpose word
+j           var Byte
+ADR         VAR word        ' ADC conversion result
+
+' I2C retrieval variables
+
+hbmax var byte
+lbmax var byte
+hbfreq2 var byte
+lbfreq2 var byte
+hbamp var byte
+lbamp var byte
+hbfreq1 var byte
+lbfreq1 var byte
+
+hbpic1 var byte
+lbpic1 var byte
+hbpic2 var byte
+lbpic2 var byte
+hbpic3 var byte
+lbpic3 var byte
+hbpic4 var byte
+lbpic4 var byte
+
+'##############################################
+
+
+
+' start up
+HIGH SO
+low Shift_out		' Output initially low
+pause 1000	        ' Allow for power up
+
+COUNTER=1
+
+Again:			' Main loop.
+LOW SO
+'  sync to the RS92 mux pulse - don't send data to FIFO when RS92 requesting data
+scan:	If MUX1 = 0 then go
+	Pause 5			' Pulse width of MUX1 is nominally 8ms so wait 5ms
+	goto scan		' to detect beginning of pulse
+go:	pause 18		' Wait 18ms. Total synch period of 18ms completed
+
+pause 200   'this wait is needed for launches - reduce if more code executed (when synced with radiosonde)
+'pause 932   'this wait reduces rate to 1 Hz if self logging in the lab: comment out for launches
+
+
+'Ch0 on RA0     (AN0)
+'Ch1 on RA1     (AN1)
+'Ch2 on RC3     (AN7)
+'Ch3 on RA4     (AN3)
+'Ch4 on RC0     (AN4)
+
+''''' uncomment this section and 'counter' commands (above and below) for analogue reads
+' make 12bit reads by sampling 4times (obtained from 16 values summed and divided by 4)
+N=16
+
+ADCON0.4=0          ' select channel AN0 (000 on bits 4,3,2)  
+ADCON0.3=0
+ADCON0.2=0
+pause 1
+gosub RepeatAD 
+Ch0res=ADR/4
+
+ADCON0.4=0          ' select channel AN1 (001 on bits 4,3,2)  
+ADCON0.3=0
+ADCON0.2=1
+pause 1
+gosub RepeatAD 
+Ch1res=ADR/4
+
+ADCON0.4=1          ' select channel AN7 (111 on bits 4,3,2)  
+ADCON0.3=1
+ADCON0.2=1
+pause 1
+gosub RepeatAD 
+Ch2res=ADR/4
+
+ADCON0.4=0          ' select channel AN3 (011 on bits 4,3,2)  
+ADCON0.3=1
+ADCON0.2=1
+pause 1
+gosub RepeatAD 
+Ch3res=ADR/4
+
+'ADCON0.4=1          ' select channel AN4 (100 on bits 4,3,2)  
+'ADCON0.3=0
+'ADCON0.2=0
+'pause 1
+'gosub RepeatAD 
+'Ch4res=1111'ADR/4
+
+'OMB
+'IF COUNTER = 2 THEN    ' read the I2C device - OMB
+I2CREAD SDA, SCL, I2COMB, [hbamp, lbamp, hbmax, lbmax, hbfreq1, lbfreq1, hbfreq2, lbfreq2]
+'Ch0res=lbamp+(256*hbamp)
+'Ch1res=lbmax+(256*hbmax)
+'Ch2res=lbfreq1+(256*hbfreq1)
+'Ch3res=lbfreq2+(256*hbfreq2)
+Ch4res=lbfreq1+(256*hbfreq1)
+'counter=0
+'endIF
+
+''PICs
+'IF COUNTER = 3 THEN    ' read the I2C device - SO2
+'I2CREAD SDA, SCL, I2CSO2, [hbpic1, lbpic1, hbpic2, lbpic2 ,hbpic3, lbpic3, hbpic4, lbpic4]
+'Ch0res=lbpic1+(256*hbpic1)
+'Ch1res=lbpic2+(256*hbpic2)
+'Ch2res=lbpic3+(256*hbpic3)
+'Ch3res=lbpic4+(256*hbpic4)
+'Ch4res=3333
+''counter=0
+'endIF
+
+''PICs
+'IF COUNTER = 4 THEN    ' read the I2C device - ACC
+'I2CREAD SDA, SCL, I2CACC, [hbpic1, lbpic1, hbpic2, lbpic2 ,hbpic3, lbpic3, hbpic4, lbpic4]
+'Ch0res=lbpic1+(256*hbpic1)
+'Ch1res=lbpic2+(256*hbpic2)
+'Ch2res=lbpic3'+(256*hbpic3)
+'Ch3res=lbpic4+(256*hbpic4) 
+'Ch4res=4444
+''counter=0
+'endIF
+'
+'PICs
+'IF COUNTER = 5 THEN    ' read the I2C device - CHARGE
+'I2CREAD SDA, SCL, I2CCHA, [hbpic1, lbpic1, hbpic2, lbpic2 ,hbpic3, lbpic3, hbpic4, lbpic4]
+'Ch0res=lbpic1+(256*hbpic1)
+'Ch1res=lbpic2+(256*hbpic2)
+'Ch2res=lbpic3+(256*hbpic3)
+'Ch3res=lbpic4+(256*hbpic4)  
+'Ch4res=5555
+'counter=0
+'endIF
+
+'PICs
+'IF COUNTER = 10 THEN    ' read the I2C device - GEIGER
+'I2CREAD SDA, SCL, I2CGEI, [hbpic1, lbpic1, hbpic2, lbpic2 ,hbpic3, lbpic3, hbpic4, lbpic4]
+'Ch0res=lbpic1+(256*hbpic1)
+'Ch1res=lbpic2+(256*hbpic2)
+'Ch2res=lbpic3+(256*hbpic3)
+'Ch3res=lbpic4+(256*hbpic4)  
+'Ch4res=6666
+'counter=0
+'endIF
+
+'PICs
+'IF COUNTER = 12 THEN    ' read the I2C device - CLOUD
+'I2CREAD SDA, SCL, I2CCLO, [hbpic1, lbpic1, hbpic2, lbpic2 ,hbpic3, lbpic3, hbpic4, lbpic4]
+'Ch0res=lbpic1+(256*hbpic1)
+'Ch1res=lbpic2+(256*hbpic2)
+'Ch2res=lbpic3+(256*hbpic3)
+'Ch3res=lbpic4+(256*hbpic4)   
+'Ch4res=7777
+'counter=0
+'endIF
+
+'PICs
+'IF COUNTER = 14 THEN    ' read the I2C device - OXFORD PHOTODIODE
+'I2CREAD SDA, SCL, I2COXF, [hbpic1, lbpic1, hbpic2, lbpic2 ,hbpic3, lbpic3, hbpic4, lbpic4]
+'Ch0res=lbpic1+(256*hbpic1)
+'Ch1res=lbpic2+(256*hbpic2)
+'Ch2res=lbpic3+(256*hbpic3)
+'Ch3res=lbpic4+(256*hbpic4)   
+'Ch4res=8888
+'counter=0
+'endIF
+
+COUNTER=COUNTER+1   ' ready for next loop
+
+'Ch4res=Ch4res+1000
+
+
+' check all values are 12bit and, if not, divide them down until they are
+Wtemp=Ch0res
+gosub ScaleProtect
+Ch0res=Wtemp
+
+Wtemp=Ch1res
+gosub ScaleProtect
+Ch1res=Wtemp
+
+Wtemp=Ch2res
+gosub ScaleProtect
+Ch2res=Wtemp
+
+Wtemp=Ch3res
+gosub ScaleProtect
+Ch3res=Wtemp
+
+'Wtemp=Ch4res
+'gosub ScaleProtect
+'Ch4res=Wtemp
+
+
+
+' pack the five values into the 4 words, digit by digit
+
+' first word 'AAAAE
+d4=ch0res dig 3
+d3=ch0res dig 2
+d2=ch0res dig 1
+d1=ch0res dig 0
+d0=ch4res dig 3
+Word1=10000+(d4*10000)+(d3*1000)+(d2*100)+(d1*10)+d0
+
+' second word 'BBBBE
+d4=ch1res dig 3
+d3=ch1res dig 2
+d2=ch1res dig 1
+d1=ch1res dig 0
+d0=ch4res dig 2
+Word2=10000+(d4*10000)+(d3*1000)+(d2*100)+(d1*10)+d0
+
+' third word 'CCCCE
+d4=ch2res dig 3
+d3=ch2res dig 2
+d2=ch2res dig 1
+d1=ch2res dig 0
+d0=ch4res dig 1
+Word3=10000+(d4*10000)+(d3*1000)+(d2*100)+(d1*10)+d0
+
+' fourth word 'DDDDE
+d4=ch3res dig 3
+d3=ch3res dig 2
+d2=ch3res dig 1
+d1=ch3res dig 0
+d0=ch4res dig 0
+Word4=10000+(d4*10000)+(d3*1000)+(d2*100)+(d1*10)+d0
+
+
+'output values to FIFO...64 bits expected
+Shiftout data_out, shift_out, 1,[Word1\16]
+Shiftout data_out, shift_out, 1,[word2\16]
+Shiftout data_out, shift_out, 1,[Word3\16]
+Shiftout data_out, shift_out, 1,[Word4\16]
+
+'and serial output, starting with a "U" and ending with a LF on RA2
+'first (Ch0) channel sent twice to overcome sending glitch
+'serout SO,2,["UU",#Ch0res,",",#Ch0res,",",#Ch1res,",",#Ch2res,",",#Ch3res,",",#Ch4res,10]
+serout SO,2,["UU",#Ch0res,",",#Ch0res,",",#Ch1res,",",#Ch2res,",",#Ch3res,",",#Ch4res,10]
+'serout SO,2,[": ",#Word1,",",#Word2,",",#Word3,",",#Word4,10]
+
+goto again		    ' repeat ad infinitum
+
+
+
+'##############################################
+' repeated 10 bit internal AtoD subroutine read for better resolution
+' - value returned in ADR
+' ensure channel required is already selected using bits 2 to 4 of ADCON0
+'##############################################
+RepeatAD:
+Wtemp=0
+    GOSUB ReadAD        ' dummy read
+for j=1 to N
+    GOSUB ReadAD        ' read AtoD
+    Wtemp=Wtemp+ADR     ' sum up values obtained
+    next j
+ADR=Wtemp
+return
+'##############################################
+
+
+'##############################################
+' 10 bit internal AtoD subroutine
+' ensure channel required is already selected using bits 2 to 4 of ADCON0
+'##############################################
+ReadAD:                         ' subroutine to read ADC for SELECTED channel
+                                ' 10bit result transferred to ADR
+    ADR=0
+    ADCON0.1=1                  ' starts conversion
+        
+    while ADCON0.1=1: WEND
+    
+    ADR.highbyte = ADRESH       ' transfer low and high bytes to ADR
+    ADR.LOWBYTE = ADRESL
+RETURN
+'##############################################
+
+
+
+ScaleProtect:
+' reduces a number to be 12bits resolution, by successive division by two
+' in place routiem so input value Wtemp, output modified Wtemp
+while (Wtemp>4096)
+Wtemp=Wtemp/2
+wend
+return
+
+

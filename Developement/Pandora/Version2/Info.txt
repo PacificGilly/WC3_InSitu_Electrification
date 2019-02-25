@@ -1,0 +1,1 @@
+Adds extra precision (1 decimal) in the vibrating wire sensor.

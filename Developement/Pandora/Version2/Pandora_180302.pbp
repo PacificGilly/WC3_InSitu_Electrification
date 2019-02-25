@@ -1,0 +1,356 @@
+' Program: PANDORA3
+' does an I2C read on RC4 (Clock) and RC5 (data)
+
+' serial output (SO) is now on RA5 (and LED too)
+'outputs serial data (mode 2, i.e. T9600 baud, 8data No parity 1 stop bit)
+
+' code for Pandora3 board for consecutive reads of analogue input channels Ch0 1,2,3
+' uses PIC analogue 10bit inputs with pseudo 16bit reads
+
+' Ch0 on RA0     (AN0)
+' Ch1 on RA1     (AN1)
+' Ch2 on RC3     (AN7)
+' Ch3 on RA4     (AN3)
+
+' some lines have been changed on connector CN2 between Pandora2 and Pandora3
+' PAN2      PAN3
+' RA4   --> RC5
+' SDO2  --> RC4
+' RA1   --> RC1 (and AN5)
+' RA0   --> RC0 (and AN4)
+
+
+' NB intended for 16F688 PIC which has greater storage
+' also runs on 16F676 if a few lines changed)
+' when programming, make sure MCLR (in View|Configuration) is "Input Pin"
+' and 16F688 oscillator INTOSCIO (defaults to 4MHz), defaults for everything else
+
+' RS92 OIF92 interfacing inherited from MiniDAS board (GWR FIFO) using 16F676 pic
+' three interface connections needed:
+' MUX (from sonde) an input on RC0
+' DataOut (to FIFO) an output on RA2
+' ShiftOut (to FIFO) an output on RC2
+
+#CONFIG
+      __config _INTRC_OSC_NOCLKOUT & _MCLRE_OFF
+#ENDCONFIG
+
+'Define OSCCAL_1K 1      ' calibrate internal oscillator...only needed for 16F676
+
+DEFINE I2C_HOLD 1
+'DEFINE I2C_SLOW 1
+DEFINE CHAR_PACING  1000
+
+'##############################################
+' configure interfacing to RS92
+'##############################################
+TRISA.3=1         ' set RA3 as an input [MUX1]
+
+ANSEL.6=0          'make RC2 a digital i/o (rather than AN6 input)
+TRISC.2=0         ' set RC2 as an output [ShiftOut]
+
+TRISA.2=0         ' set RA2 as an output [DataOut]
+
+MUX1 		VAR PORTA.3
+Data_Out 	VAR PORTA.2
+Shift_Out 	VAR PORTC.2
+
+'##############################################
+
+
+'##############################################
+' configure internal 10 bit AtoD
+'##############################################
+ADCON0.0=1          ' internal AtoD on
+
+ADCON1.6=1          ' set AtoD clock time to Fosc/16 (101 on bits 6,5,6)
+ADCON1.5=0
+ADCON1.4=1
+
+ADCON0.6=0          ' use VDD supply as AtoD reference voltage
+ADCON0.7=1          ' right justified
+
+                   ' Analog comparators off
+'CMCON=0             ' lines needed for 16F676
+CMCON0.0=0         ' lines needed for 16F688
+CMCON0.1=0         ' lines needed for 16F688
+CMCON0.2=0         ' lines needed for 16F688
+
+' configure analogue inputs
+TRISA.0=1           ' make RA0 operate as an input
+ANSEL.0=1           ' select analogue input mode
+
+TRISA.1=1           ' make RA1 operate as an input
+ANSEL.1=1           ' select analogue input mode
+
+TRISC.3=1           ' make RC3 operate as an input
+ANSEL.7=1
+
+TRISA.4=1           ' make RA4 operate as an input
+ANSEL.3=1
+
+TRISC.0=1           ' make RC0 operate as an input...in case it's connected
+ANSEL.4=1
+
+'##############################################
+
+
+
+'##############################################
+' I2C connections
+I2C_DATA_PIN         var   PORTC.5
+I2C_DATA_TRIS        var   TRISC.5
+I2C_CLOCK_PIN        var   PORTC.4
+I2C_CLOCK_TRIS       var   TRISC.4
+
+' I2C variables
+I2Cdataw             var   word[5]           'array of 5 words for I2Cdataw
+I2Cdata              var   I2Cdataw.byte0    'access same array as both words and bytes
+I2Cnumreadbytes      var   byte
+I2CslaveAddress      var   byte
+I2C_STATUS           var   byte
+I2C_STATUS_TIMEOUT   var   I2C_STATUS.0
+I2C_STATUS_DONE      var   I2C_STATUS.1
+                                                                  'slow master routine uses slave address directly
+I2COMB con 3         ' OMB address = 3      In Arduino code = 3
+I2CSO2 con 5         ' SO2 address = 5      In slave code = 11
+I2CACC con 7         ' ACC address = 7      In slave code = 15
+I2CCHA con 9         ' CHA address = 9      In slave code = 19
+I2CGEI con 11        ' GEI address = 11     In slave code = 23
+I2CCLO con 13        ' CLO address = 13     In slave code = 27
+I2COXF con 15        ' OXF address = 15     In slave code = 31
+'##############################################
+
+
+'##############################################
+' serial output line
+TRISA.5=0           ' make RA5 a (digital) output
+SO var PORTA.5     ' for serial output
+'##############################################
+
+
+'##############################################
+' variables
+Ch0res	     VAR word
+Ch1res	     VAR word
+Ch2res 	     VAR word
+Ch3res 	     VAR word
+Ch4res 	     VAR word
+
+Word1 var word
+Word2 var word
+Word3 var word
+Word4 var word
+d0 var byte
+d1 var byte
+d2 var byte
+d3 var byte
+d4 var byte
+
+counter     var byte
+N           var byte        ' number of repeated 10bit AD reads
+Wtemp       var word        ' general purpose word
+j           var Byte
+ADR         VAR word        ' ADC conversion result
+
+'##############################################
+
+' start up
+HIGH SO
+low Shift_out		' Output initially low
+pause 1000	        ' Allow for power up
+
+COUNTER=1
+
+Again:			' Main loop.
+'LOW So
+'  sync to the RS92 mux pulse - don't send data to FIFO when RS92 requesting data
+scan:	If MUX1 = 0 then go
+	Pause 5			' Pulse width of MUX1 is nominally 8ms so wait 5ms
+	goto scan		' to detect beginning of pulse
+go:	pause 18		' Wait 18ms. Total synch period of 18ms completed
+
+pause 200   'this wait is needed for launches - reduce if more code executed (when synced with radiosonde)
+'pause 932   'this wait reduces rate to 1 Hz if self logging in the lab: comment out for launches
+
+N=16
+
+ADCON0.4=0          ' select channel AN0 (000 on bits 4,3,2)  
+ADCON0.3=0
+ADCON0.2=0
+pause 1
+gosub RepeatAD 
+Ch0res=ADR/4
+
+ADCON0.4=0          ' select channel AN1 (001 on bits 4,3,2)  
+ADCON0.3=0
+ADCON0.2=1
+pause 1
+gosub RepeatAD 
+Ch1res=ADR/4
+
+ADCON0.4=1          ' select channel AN7 (111 on bits 4,3,2)  
+ADCON0.3=1
+ADCON0.2=1
+pause 1
+gosub RepeatAD 
+Ch2res=ADR/4
+
+ADCON0.4=0          ' select channel AN3 (011 on bits 4,3,2)  
+ADCON0.3=1
+ADCON0.2=1
+pause 1
+gosub RepeatAD 
+Ch3res=ADR/4
+
+              
+if counter = 1 then
+I2CslaveAddress = I2CCHA ' [LIN : LOG : CY : IR : 1111]
+I2Cnumreadbytes = 4
+gosub SLOW_I2CREAD
+if I2C_STATUS_DONE = 1 then
+
+   Ch0res= 256*I2Cdata[0] + I2Cdata[1]     'big endian data
+   Ch1res= 256*I2Cdata[2] + I2Cdata[3]
+
+endif
+
+   Ch4res= 1111
+   
+   Ch0res= Ch0res/16    ' reduce to 12 bit
+   Ch1res= Ch1res/16    ' reduce to 12 bit 
+'   Ch2res= Ch0res/16    ' reduce to 12 bit
+'   Ch3res= Ch1res/16    ' reduce to 12 bit
+   
+endif
+
+                 
+if counter = 2 then
+
+I2CslaveAddress = I2CCHA ' [LIN : SD : PLL : IR : 1111]
+I2Cnumreadbytes = 4
+gosub SLOW_I2CREAD
+if I2C_STATUS_DONE = 1 then
+
+   Ch0res= 256*I2Cdata[0] + I2Cdata[1]     'big endian data
+
+endif
+
+I2CslaveAddress = I2CACC
+I2Cnumreadbytes = 8
+gosub SLOW_I2CREAD
+if I2C_STATUS_DONE = 1 then
+
+   Ch1res= 256*I2Cdata[2] + I2Cdata[3]
+
+endif
+
+I2CslaveAddress = I2COMB
+I2Cnumreadbytes = 8
+gosub SLOW_I2CREAD
+if I2C_STATUS_DONE = 1 then
+
+   Ch2res= 256*I2Cdata[4] + I2Cdata[5]
+
+endif
+
+   Ch4res= 1112
+
+   Ch0res= Ch0res/16    ' reduce to 12 bit
+   
+   counter=0
+
+endif
+
+
+COUNTER=COUNTER+1   ' ready for next loop
+
+Ch4Res=Ch4Res+1000
+
+' pack the five values into the 4 words, digit by digit
+
+' first word 'AAAAE
+d4=ch0res dig 3
+d3=ch0res dig 2
+d2=ch0res dig 1
+d1=ch0res dig 0
+d0=ch4res dig 3
+Word1=10000+(d4*10000)+(d3*1000)+(d2*100)+(d1*10)+d0
+
+' second word 'BBBBE
+d4=ch1res dig 3
+d3=ch1res dig 2
+d2=ch1res dig 1
+d1=ch1res dig 0
+d0=ch4res dig 2
+Word2=10000+(d4*10000)+(d3*1000)+(d2*100)+(d1*10)+d0
+
+' third word 'CCCCE
+d4=ch2res dig 3
+d3=ch2res dig 2
+d2=ch2res dig 1
+d1=ch2res dig 0
+d0=ch4res dig 1
+Word3=10000+(d4*10000)+(d3*1000)+(d2*100)+(d1*10)+d0
+
+' fourth word 'DDDDE
+d4=ch3res dig 3
+d3=ch3res dig 2
+d2=ch3res dig 1
+d1=ch3res dig 0
+d0=ch4res dig 0
+Word4=10000+(d4*10000)+(d3*1000)+(d2*100)+(d1*10)+d0
+
+
+
+'output values to FIFO
+Shiftout data_out, shift_out, 1,[Word1\16]
+Shiftout data_out, shift_out, 1,[Word2\16]
+Shiftout data_out, shift_out, 1,[Word3\16]
+Shiftout data_out, shift_out, 1,[Word4\16]
+
+'and serial output, starting with a "U" and ending with a LF on RA2
+'first (Ch0) channel sent twice to overcome sending glitch
+
+' monitoring serial output is on RA5
+serout SO,2,["UU ",#Ch0res,", ",#Ch1res,", ",#Ch2res,", ",#Ch3res,", ",#Ch4res,10]
+'serout SO,2,[", ",#Word1,", ",#Word2,", ",#Word3,", ",#Word4,10]
+
+goto again		    ' repeat ad infinitum
+
+
+
+'##############################################
+' repeated 10 bit internal AtoD subroutine read for better resolution
+' - value returned in ADR
+' ensure channel required is already selected using bits 2 to 4 of ADCON0
+'##############################################
+RepeatAD:
+Wtemp=0
+    GOSUB ReadAD        ' dummy read
+for j=1 to N
+    GOSUB ReadAD        ' read AtoD
+    Wtemp=Wtemp+ADR     ' sum up values obtained
+    next j
+ADR=Wtemp
+return
+'##############################################
+
+
+'##############################################
+' 10 bit internal AtoD subroutine
+' ensure channel required is already selected using bits 2 to 4 of ADCON0
+'##############################################
+ReadAD:                         ' subroutine to read ADC for SELECTED channel
+                                ' 10bit result transferred to ADR
+    ADR=0
+    ADCON0.1=1                  ' starts conversion
+
+    while ADCON0.1=1: WEND
+
+    ADR.highbyte = ADRESH       ' transfer low and high bytes to ADR
+    ADR.LOWBYTE = ADRESL
+RETURN
+'##############################################
+
+INCLUDE "MasterSlowI2CreadNoTimeout.pbp"
