@@ -2,7 +2,8 @@ from __future__ import print_function, division
 import numpy as np
 import sys, warnings
 import time as systime
-
+from copy import deepcopy
+	
 from .system import isarray, isnumeric
 
 class array:
@@ -333,40 +334,197 @@ def overlaps(arr, invert=False):
 
 	return arr
 		
+def flat_old(array):
+	"""
+	Inner function for flatten. Returns original array if array is already
+	flat.
+	"""
 	
-def flatten(array, type=None, dtype=None):
-	"""Flattens the input array into 1D.
-	
-	type : 'list' or 'ndarray'
-	dtype : when ndarray is used, specify the dtype or it will be found automatically"""
-	
-	if type is not None:
-		if type == 'list':
-			return [item for sublist in array for item in sublist]
-		elif type == 'ndarray':
-			if dtype is None:
-				if isinstance(array, np.ndarray):
-					return np.array([item for sublist in array for item in sublist], dtype=array.dtype)
-				else:
-					warnings.warn('\n[flatten]: A dtype must be specified if the input array is a list and you want the output array to be numpy. Numpy will estimate the data type automatically!', SyntaxWarning, stacklevel=2)
-					return np.array([item for sublist in array for item in sublist])
-			else:
-				return np.array([item for sublist in array for item in sublist], dtype=dtype)
-		else:
-			UserWarning('[Error] Input array to flatten must be either a list or ndarray. Returning empty array.')
-			return []
-	else:
+	try:
 		if isinstance(array, list):
 			return [item for sublist in array for item in sublist]
 		elif isinstance(array, np.ndarray):
-			if dtype is None:
-				return np.array([item for sublist in array for item in sublist], dtype=array.dtype)
-			else:
-				return np.array([item for sublist in array for item in sublist], dtype=dtype)
+			return np.array([item for sublist in array for item in sublist])
+		elif isinstance(array, tuple):
+			return tuple([item for sublist in array for item in sublist])
 		else:
-			UserWarning('[Error] Input array to flatten must be either a list or ndarray. Returning empty array.')
-			return []
+			raise ValueError("flat requires either list, tuple or ndarray")
+			
+	except TypeError: # Assumption: when array is already flat
+		return array
 
+def flat(array, level=1):
+	"""
+	Flatten a list of (lists of (lists of strings)) for any level 
+	of nesting
+	
+	Parameters
+	----------
+	array : array_like, string
+		An array_like object containing all string values.
+	level : int, optional
+		The number of nested levels to remove. Specify -1 to removed all
+		nests automatically.
+		
+	Returns
+	-------
+	x : generator
+		The flattened array is returned as a generator. Use as an 
+		iterator, or used list(x) to return values.
+	
+	Reference
+	---------
+	https://stackoverflow.com/a/17864492
+	https://stackoverflow.com/a/5286571/8765762
+	
+	Notes
+	-----
+	Only works with both Python 2.x and 3.x
+	
+	"""
+	
+	for x in array:
+		
+		# If desired level of nesting reached, yield x
+		if level == 0:
+			yield x
+		
+		# Else if not a string level, go down another level
+		elif hasattr(x, '__iter__') and not isinstance(x, str):
+			for y in flat(x, level=level-1):
+				yield y
+
+		# If at string level, then yield x
+		else:
+			yield x
+
+def flatten(array, type=None, dtype=None, level=1, generator=False):
+	"""
+	Flattens the input array into 1D.
+	
+	type : 'list' or 'ndarray'
+	dtype : when ndarray is used, specify the dtype or it will be found automatically
+	level : number of levels to flatten. Option is -1
+	"""
+	
+	# NEW: Flatten the array recursively using flat function.
+	array = flat(array, level=level)
+	
+	if generator is False:
+		array = list(array)
+		
+		if type is not None:
+			if type == 'list':
+				return array
+			elif type == 'ndarray':
+				if dtype is None:
+					if isinstance(array, np.ndarray):
+						try:
+							return np.array(array, dtype=array.dtype)
+						except ValueError:
+							raise UserWarning('[Error] Cannot convert to NumPy. Returning as a list instead')
+							return array
+					else:
+						warnings.warn('\n[flatten]: A dtype must be specified if the input array is a list and you want the output array to be numpy. Numpy will estimate the data type automatically!', SyntaxWarning, stacklevel=2)
+						return np.array(array)
+				else:
+					try:
+						return np.array(array, dtype=dtype)
+					except ValueError:
+						raise UserWarning('[Error] Cannot convert to NumPy. Returning as a list instead')
+						return array
+			else:
+				raise UserWarning('[Error] Input array to flatten must be either a list or ndarray. Returning empty array.')
+				return []
+		else:
+			if isinstance(array, list):
+				return array
+			elif isinstance(array, np.ndarray):
+				if dtype is None:
+					try:
+						return np.array(array, dtype=array.dtype)
+					except ValueError:
+						raise UserWarning('[Error] Cannot convert to NumPy. Returning as a list instead')
+						return array
+				else:
+					try:
+						return np.array(array, dtype=dtype)
+					except ValueError:
+						raise UserWarning('[Error] Cannot convert to NumPy. Returning as a list instead')
+						return array
+			else:
+				raise UserWarning('[Error] Input array to flatten must be either a list or ndarray. Returning empty array.')
+				return []
+	else:
+		return array
+
+def flatten_old(array, type=None, dtype=None, level=1):
+
+	level -= 1
+
+	array_old = deepcopy(array)
+	array = flat(array)
+	
+	# If level != 0, perform recursion!
+	if level == 0:
+		return_data = True
+		
+	# If level == -1, perform auto flattening to bare bones
+	elif (level < 0) and np.array_equal(array, array_old):
+		return_data = True
+	
+	# Escape when recursion is excessive.
+	elif level < -50:
+		return_data = True
+	
+	# Recursion!
+	else:
+		return flatten(array, type=type, dtype=dtype, level=level)
+	
+	if return_data:
+		if type is not None:
+			if type == 'list':
+				return array
+			elif type == 'ndarray':
+				if dtype is None:
+					if isinstance(array, np.ndarray):
+						try:
+							return np.array(array, dtype=array.dtype)
+						except ValueError:
+							UserWarning('[Error] Cannot convert to NumPy. Returning as a list instead')
+							return array
+					else:
+						warnings.warn('\n[flatten]: A dtype must be specified if the input array is a list and you want the output array to be numpy. Numpy will estimate the data type automatically!', SyntaxWarning, stacklevel=2)
+						return np.array(array)
+				else:
+					try:
+						return np.array(array, dtype=dtype)
+					except ValueError:
+						UserWarning('[Error] Cannot convert to NumPy. Returning as a list instead')
+						return array
+			else:
+				UserWarning('[Error] Input array to flatten must be either a list or ndarray. Returning empty array.')
+				return []
+		else:
+			if isinstance(array, list):
+				return array
+			elif isinstance(array, np.ndarray):
+				if dtype is None:
+					try:
+						return np.array(array, dtype=array.dtype)
+					except ValueError:
+						UserWarning('[Error] Cannot convert to NumPy. Returning as a list instead')
+						return array
+				else:
+					try:
+						return np.array(array, dtype=dtype)
+					except ValueError:
+						UserWarning('[Error] Cannot convert to NumPy. Returning as a list instead')
+						return array
+			else:
+				UserWarning('[Error] Input array to flatten must be either a list or ndarray. Returning empty array.')
+				return []
+				
 def near(array,value):
 	"""https://stackoverflow.com/a/2566508"""
 
