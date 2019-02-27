@@ -2654,7 +2654,7 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 			liquid, mixed and ice clouds"""
 						
 			if plot_spacecharge is True:
-				############################################################################
+				#############################################################################
 				"""Space Charge"""
 				
 				# Calculate the Mann-Whitney and Wilcoxon statistical tests
