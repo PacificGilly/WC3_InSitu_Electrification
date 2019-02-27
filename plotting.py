@@ -369,7 +369,7 @@ def fake_colorbar():
 	
 	return im
 	
-def hide_axis(plt=None, ax=None, x_or_y=None, remove_gridlines=False):
+def hide_axis(plt=None, ax=None, x_or_y=None, remove_gridlines=False, remove_labels=False):
 	"""
 	Removes axis of a Matplotlib plot.
 	
@@ -400,19 +400,27 @@ def hide_axis(plt=None, ax=None, x_or_y=None, remove_gridlines=False):
 	if plt is not None: ax = plt.gca()
 	
 	if x_or_y == 'x':
-		if remove_gridlines is True:
+		if remove_gridlines:
 			ax.axes.get_xaxis().set_ticks([])
-		elif remove_gridlines is False:
+		elif not remove_gridlines:
 			ax.axes.get_xaxis().set_ticklabels([])
 		else:
 			raise ValueError("remove_gridlines is a boolean parameter and accepts either True or False")
+			
+		if remove_labels:
+			ax.set_xlabel("")
+			
 	elif x_or_y == 'y':
-		if remove_gridlines is True:
+		if remove_gridlines:
 			ax.axes.get_yaxis().set_ticks([])
-		elif remove_gridlines is False:
+		elif not remove_gridlines:
 			ax.axes.get_yaxis().set_ticklabels([])
 		else:
 			raise ValueError("remove_gridlines is a boolean parameter and accepts either True or False")
+			
+		if remove_labels:
+			ax.set_ylabel("")
+			
 	else:
 		raise ValueError("x_or_y only takes either 'x' or 'y'.")
 		
