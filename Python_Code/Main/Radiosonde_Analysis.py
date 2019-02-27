@@ -51,6 +51,9 @@ import PhD_Config as PhD_Global
 
 import statsmodels.api as sm
 
+# Allow relative imports
+sys.path.append("..")
+
 # Import Tephigram Plotter
 from Extras.Tephigram import Tephigram as SPTephigram
 
@@ -736,13 +739,196 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 			raise ValueError("[_CloudHeights] method parameter can only take the optinos 'Zhang' or 'IR'")
 		
 		return Cloud_Heights, Clear_Heights
+	
+	def _ElectricField_Estimator(self, Radiosonde_Data, Cloud_Heights, LaunchTime, method='static', verbose=False):
+		"""
+		This function calculates the electric field.
 		
+		Parameters
+		----------
+		Radiosonde_Data : dict
+			The data of the ascent profile. Must specifiy base dataset
+			for the specific ascent you want to process (e.g. 
+			
+			Radiosonde_Data[<sensor>]
+			
+		Cloud_Heights : 2D numpy array
+			The start and end heights for all clouds detected.
+		
+		LaunchTime : np.datetime64
+			The launchtime of the radiosonde representing time 0 in the
+			radiosonde_data. The format must be in numpy datetime64.
+		
+		method : str, optional, default='static'
+			The method of calculating the electric field. Two options
+			are:
+			
+			'static' : All point charges are placed in the same temporal
+						and spatial position. This is under the assumption
+						that the evolution of the charge is static and
+						has changed negligbile during the ascent through the
+						cloud.
+			'dynamic' : All point charges are place is specific temporal
+						and spatial poisitions calculated from the time and 
+						position of the radiosonde upon measurement. This is
+						under the assumption that the charge is developing
+						and a better representation of the charge.
+						
+		Returns
+		-------
+		Cloud_DateTime : ndarray
+			A one dimensional time-series with the same dimensions as 
+			Cloud_ElectricField_Total.
+			
+		Cloud_ElectricField : ndarray
+			A multidimensional array of the estimated PG for each
+			individual point charge that was placed. Therefore the
+			size of this array has the form 
+			
+			(Cloud_DateTime.size, PointCharges.size)
+		
+		Cloud_ElectricField_Total : ndarray
+			A one dimensional array of the estimated PG.		
+		"""
+		
+		# Constants
+		PG0 = 0 # Background potential gradient
+		k = 2500000/22468879568420441 #Coulombs Constant (exact value!)
+		kn2ms = 0.5144 #Conversion between knots and m/s
+		
+		############################################################################
+		"""Pre-Condition Data"""
+		
+		# Remove nan's from Time, Height, Wind, SpaceCharge
+		Time, Height, Wind, SpaceCharge = gu.antifinite((Radiosonde_Data['Units']['time'], 
+			Radiosonde_Data['Units']['height'],
+			Radiosonde_Data['Units']['WindSpeed'],
+			Radiosonde_Data['Units']['SpaceCharge']), 
+			unpack=True)
+				
+		# Detect sign changes in data
+		SignChange = np.where(np.diff(np.sign(SpaceCharge)))[0]
+		
+		# Get index of lowest cloud
+		CloudIndex = gu.searchsorted(Radiosonde_Data['Units']['height'], Cloud_Heights[0])
+		# CloudIndex = gu.searchsorted(Radiosonde_Data['Units']['height'], [0,12])
+		
+		# Get SignChange position for cloud
+		Cloud_SignChange = SignChange[(SignChange >= CloudIndex[0]) & (SignChange <= CloudIndex[1])]
+		
+		# Get time stamps of sign change
+		Cloud_TimeChange = Time[Cloud_SignChange]
+		
+		# Broadcast Cloud_SignChange into a 2D array which is easier to 
+		# use with for loops.
+		Cloud_SignChange = gu.broadcast(Cloud_SignChange,2,1) + 1
+		
+		############################################################################
+		"""Set-up electric field environment"""
+		
+		# [1] SPACE CHARGE DENSITY
+		# Calculate the 95th percentile of the space charge density between
+		# each polarity inversion. Making sure to conserve local sign.
+		Cloud_SpaceCharge = np.zeros(Cloud_SignChange.shape[0])
+		for i,  space in enumerate(Cloud_SignChange):
+			Local_SpaceCharge = SpaceCharge[space[0]:space[1]]
+			Local_Sign = sp.stats.mode(np.sign(Local_SpaceCharge))[0][0]
+			Cloud_SpaceCharge[i] = Local_Sign*np.nanpercentile(np.abs(Local_SpaceCharge), 100)
+		
+		# Convert space charge from pC to C
+		Cloud_SpaceCharge /= 10**12
+		
+		# [2] POINT CHARGE HEIGHT
+		# Calculate the height positions for each point charge. i.e. between 
+		# each sign change the absolute maximum space charge value is found
+		# and then indexed onto the height array.
+		Cloud_Height = np.zeros(Cloud_SignChange.shape[0])
+		for i, space in enumerate(Cloud_SignChange):
+			
+			# Get the local index of the absolute maximum space charge density
+			mask = np.argmax(np.abs(SpaceCharge[space[0]:space[1]]))
+			
+			# Find the height using 'mask' on the same subsetted data
+			PC_Height = Height[space[0]:space[1]][mask]
+			
+			# Determine the horizontal distance between RUAO and Point Charge.
+			if method == 'static':
+				Cloud_Height[i] = PC_Height
+			elif method == 'dynamic':
+				Cloud_Height[i] = ((Radiosonde_Data['Units']['range'][space[0]:space[1]][mask]/1000)**2 + PC_Height**2)**0.5
+				
+		# Convert heights from km to m
+		Cloud_Height *= 1000
+		
+		# [3] POINT CHARGE AREA
+		# Calculate the area that each point charge corresponds to. Here
+		# we use the vertical height gained between sign changes.
+		Cloud_AscentArea = np.array([Height[space[1]] - Height[space[0]] for space in Cloud_SignChange], dtype=np.float64)*1000
+		
+		# [4] CLOUD CHARGE
+		# Now calculate the charge within the area.
+		Cloud_Charge = Cloud_SpaceCharge * (4/3)*np.pi*Cloud_AscentArea**3 # * 3
+		
+		# [5] CLOUD VELOCITY
+		# Calculate the velocity of each point charge.
+		Cloud_Velocity = np.array([np.nanmean(Wind[space[0]:space[1]]) for space in Cloud_SignChange], dtype=np.float64) # /4.5
+		
+		# [6] CLOUD TIME
+		# Specify the time range in seconds to calculate the electric field over.
+		# The time range revolves around the first point charge specified,
+		# therefore, Cloud_Time is typically specified with +- bounds. 
+		Cloud_Time = np.arange(-3000, 3000, 1)
+		
+		# [7] CLOUD TIME DIFFERENCE
+		# Get the time for each point charge.
+		Cloud_TimeDiff = np.zeros(Cloud_SignChange.shape[0])
+		
+		if method == 'dynamic':
+			for i, space in enumerate(Cloud_SignChange):
+				
+				# Get the local index of the absolute maximum space charge density
+				mask = np.argmax(np.abs(SpaceCharge[space[0]:space[1]]))
+				
+				# Find the height using 'mask' on the same subsetted data
+				Cloud_TimeDiff[i] = Time[space[0]:space[1]][mask]
+			Cloud_TimeDiff -= Cloud_TimeDiff[0]
+
+		############################################################################
+		"""Calculate the electric field"""
+		
+		# [8] ELECTRIC FIELD CALCULATION
+		# Now the Cloud_Time, Cloud_TimeDiff, Cloud_Velocity, Cloud_Height and 
+		# Cloud_Charge has been calculated, the electric field can now be found
+		Cloud_ElectricField = zip(np.zeros(Cloud_SignChange.shape[0]))
+		for i, (time_diff, height, velocity, charge) in enumerate(
+				zip(Cloud_TimeDiff, Cloud_Height, Cloud_Velocity, Cloud_Charge)):
+			
+			#Cloud_ElectricField[i] = (gu.cosarctan(((Cloud_Time+time_diff)*velocity)/height)*charge)/(k*height**2)
+			Cloud_ElectricField[i] = (gu.cosarctan(((Cloud_Time-time_diff)*velocity)/height)*charge)/(k*height**2)
+			
+		# Add the background electric field to the calculations. For now we can
+		# assume the background electric field is 100 V/m.
+		Cloud_ElectricField_Total = PG0 + np.nansum(Cloud_ElectricField, axis=0)
+		
+		############################################################################
+		"""Determine the time stamp data for the flight"""
+		
+		# Get the time when the radiosonde reached the cloud base
+		Cloud_BaseTime = LaunchTime + np.timedelta64(int(Radiosonde_Data['Units']['time'][CloudIndex[0]]), 's')
+
+		# Calculate datetimes for each calculation in Cloud_ElectricField_Total
+		Cloud_DateTime = Cloud_BaseTime + Cloud_Time.astype('timedelta64[s]')
+		
+		if verbose: print("Number of Point Charges =", Cloud_SignChange.shape[0])
+		
+		return Cloud_DateTime, Cloud_ElectricField, Cloud_ElectricField_Total
+	
 	def Superplotter(self):
 		"""
 		This function will plot the data from a single radiosonde flight
 		"""
 		
-		if self.verbose is True: gu.cprint("[INFO] You are running Superplotter from the DEV release", type='bold')
+		if self.verbose: gu.cprint("[INFO] You are running Superplotter from the DEV release", type='bold')
 		
 		############################################################################
 		"""Prerequisites"""
@@ -2139,10 +2325,11 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 		
 		# Conditionals
 		section1 = True
-		plot_spacecharge	= False
+		plot_spacecharge	= True
+		plot_cloud			= False
 		plot_ir				= False
 		plot_cyan			= False
-		plot_ircyan_diff	= True
+		plot_ircyan_diff	= False
 		plot_ircyan_div		= False
 		
 		section2 = False
@@ -2219,8 +2406,22 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 		Air_IRdivCyan_Mixed = []
 		Air_RH_Mixed = []
 		
-		#Sensor_Package = np.arange(1,11).astype('S2') # Use for Space Charge Plots Only
-		Sensor_Package = ['3', '4', '5', '9', '10'] # Use for Cloud Sensor Plots Only
+		Air_SpaceCharge_Mixed_Ice = []
+		Air_IR_Mixed_Ice = []
+		Air_Cyan_Mixed_Ice = []
+		Air_IRdiffCyan_Mixed_Ice = []
+		Air_IRdivCyan_Mixed_Ice = []
+		Air_RH_Mixed_Ice = []
+		
+		Air_SpaceCharge_Mixed_Liquid = []
+		Air_IR_Mixed_Liquid = []
+		Air_Cyan_Mixed_Liquid = []
+		Air_IRdiffCyan_Mixed_Liquid = []
+		Air_IRdivCyan_Mixed_Liquid = []
+		Air_RH_Mixed_Liquid = []
+		
+		Sensor_Package = np.arange(1,11).astype('S2') # Use for Space Charge Plots Only
+		#Sensor_Package = ['3', '4', '5', '9', '10'] # Use for Cloud Sensor Plots Only
 		#Sensor_Package = ['9', '10']
 		#Sensor_Package = ['4']
 		for sensor in Sensor_Package:
@@ -2294,13 +2495,6 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 					mask = Tdry_Subset < 0
 					
 					Height_Subset2 = Height_Subset[mask]
-					# Cloud_SpaceCharge_Mixed_Ice.append(SpaceCharge_Subset[mask] * (1000 * (Height_Subset2[-1] - Height_Subset2[0]))**3)
-					# Cloud_IR_Mixed_Ice.append(IR_Subset[mask] * (1000 * (Height_Subset2[-1] - Height_Subset2[0]))**3)
-					# Cloud_Cyan_Mixed_Ice.append(Cyan_Subset[mask] * (1000 * (Height_Subset2[-1] - Height_Subset2[0]))**3)
-					# Cloud_IRdiffCyan_Mixed_Ice.append(IRdiffCyan_Subset[mask] * (1000 * (Height_Subset2[-1] - Height_Subset2[0]))**3)
-					# Cloud_IRdivCyan_Mixed_Ice.append(IRdivCyan_Subset[mask] * (1000 * (Height_Subset2[-1] - Height_Subset2[0]))**3)
-					# Cloud_RH_Mixed_Ice.append(RH_Subset[mask] * (1000 * (Height_Subset2[-1] - Height_Subset2[0]))**3)
-					
 					Cloud_SpaceCharge_Mixed_Ice.append(SpaceCharge_Subset[mask])
 					Cloud_IR_Mixed_Ice.append(IR_Subset[mask])
 					Cloud_Cyan_Mixed_Ice.append(Cyan_Subset[mask])
@@ -2309,13 +2503,6 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 					Cloud_RH_Mixed_Ice.append(RH_Subset[mask])
 					
 					Height_Subset2 = Height_Subset[~mask]
-					# Cloud_SpaceCharge_Mixed_Liquid.append(SpaceCharge_Subset[~mask] * (1000 * (Height_Subset2[-1] - Height_Subset2[0]))**3)
-					# Cloud_IR_Mixed_Liquid.append(IR_Subset[~mask] * (1000 * (Height_Subset2[-1] - Height_Subset2[0]))**3)
-					# Cloud_Cyan_Mixed_Liquid.append(Cyan_Subset[~mask] * (1000 * (Height_Subset2[-1] - Height_Subset2[0]))**3)
-					# Cloud_IRdiffCyan_Mixed_Liquid.append(IRdiffCyan_Subset[~mask] * (1000 * (Height_Subset2[-1] - Height_Subset2[0]))**3)
-					# Cloud_IRdivCyan_Mixed_Liquid.append(IRdivCyan_Subset[~mask] * (1000 * (Height_Subset2[-1] - Height_Subset2[0]))**3)
-					# Cloud_RH_Mixed_Liquid.append(RH_Subset[~mask] * (1000 * (Height_Subset2[-1] - Height_Subset2[0]))**3)
-					
 					Cloud_SpaceCharge_Mixed_Liquid.append(SpaceCharge_Subset[~mask])
 					Cloud_IR_Mixed_Liquid.append(IR_Subset[~mask])
 					Cloud_Cyan_Mixed_Liquid.append(Cyan_Subset[~mask])
@@ -2339,6 +2526,7 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 			
 				# Subset data
 				Tdry_Subset = Tdry[AirIndex[0]:AirIndex[1]]
+				Height_Subset = Height[AirIndex[0]:AirIndex[1]]
 				RH_Subset = RH[AirIndex[0]:AirIndex[1]]
 				SpaceCharge_Subset = SpaceCharge[AirIndex[0]:AirIndex[1]]
 				IR_Subset = IR[AirIndex[0]:AirIndex[1]]
@@ -2371,7 +2559,26 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 					Air_IRdiffCyan_Mixed.append(IRdiffCyan_Subset)
 					Air_IRdivCyan_Mixed.append(IRdivCyan_Subset)
 					Air_RH_Mixed.append(RH_Subset)
-				
+					
+					# Subset data further into ice and liquid parts of the mixed phase cloud
+					mask = Tdry_Subset < 0
+					
+					Height_Subset2 = Height_Subset[mask]
+					Air_SpaceCharge_Mixed_Ice.append(SpaceCharge_Subset[mask])
+					Cloud_IR_Mixed_Ice.append(IR_Subset[mask])
+					Cloud_Cyan_Mixed_Ice.append(Cyan_Subset[mask])
+					Cloud_IRdiffCyan_Mixed_Ice.append(IRdiffCyan_Subset[mask])
+					Cloud_IRdivCyan_Mixed_Ice.append(IRdivCyan_Subset[mask])
+					Cloud_RH_Mixed_Ice.append(RH_Subset[mask])
+					
+					Height_Subset2 = Height_Subset[~mask]
+					Cloud_SpaceCharge_Mixed_Liquid.append(SpaceCharge_Subset[~mask])
+					Cloud_IR_Mixed_Liquid.append(IR_Subset[~mask])
+					Cloud_Cyan_Mixed_Liquid.append(Cyan_Subset[~mask])
+					Cloud_IRdiffCyan_Mixed_Liquid.append(IRdiffCyan_Subset[~mask])
+					Cloud_IRdivCyan_Mixed_Liquid.append(IRdivCyan_Subset[~mask])
+					Cloud_RH_Mixed_Liquid.append(RH_Subset[~mask])
+					
 				with warnings.catch_warnings():
 					warnings.simplefilter("ignore")
 				
@@ -2412,30 +2619,35 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 		Cloud_IRdivCyan_Mixed_Ice = np.round(gu.flatten(Cloud_IRdivCyan_Mixed_Ice, type='ndarray', dtype=np.float64)).astype(int)
 		Cloud_IRdivCyan_Mixed_Liquid = np.round(gu.flatten(Cloud_IRdivCyan_Mixed_Liquid, type='ndarray', dtype=np.float64)).astype(int)
 		
-		Cloud_RH_Liquid = gu.flatten(Cloud_RH_Liquid, type='ndarray', dtype=np.float64)
-		Cloud_RH_Ice = gu.flatten(Cloud_RH_Ice, type='ndarray', dtype=np.float64)
-		Cloud_RH_Mixed = gu.flatten(Cloud_RH_Mixed, type='ndarray', dtype=np.float64)
-		Cloud_RH_Mixed_Ice = gu.flatten(Cloud_RH_Mixed_Ice, type='ndarray', dtype=np.float64)
-		Cloud_RH_Mixed_Liquid = gu.flatten(Cloud_RH_Mixed_Liquid, type='ndarray', dtype=np.float64)
-		
 		Air_SpaceCharge_Liquid = gu.flatten(Air_SpaceCharge_Liquid, type='ndarray', dtype=np.float64)
 		Air_SpaceCharge_Ice = gu.flatten(Air_SpaceCharge_Ice, type='ndarray', dtype=np.float64)
 		Air_SpaceCharge_Mixed = gu.flatten(Air_SpaceCharge_Mixed, type='ndarray', dtype=np.float64)
+		Air_SpaceCharge_Mixed_Ice = gu.flatten(Air_SpaceCharge_Mixed_Ice, type='ndarray', dtype=np.float64)
+		Air_SpaceCharge_Mixed_Liquid = gu.flatten(Air_SpaceCharge_Mixed_Liquid, type='ndarray', dtype=np.float64)
+		
 		Air_IR_Liquid = np.round(gu.flatten(Air_IR_Liquid, type='ndarray', dtype=np.float64)).astype(int)
 		Air_IR_Ice = np.round(gu.flatten(Air_IR_Ice, type='ndarray', dtype=np.float64)).astype(int)
 		Air_IR_Mixed = np.round(gu.flatten(Air_IR_Mixed, type='ndarray', dtype=np.float64)).astype(int)
+		Air_IR_Mixed_Ice = np.round(gu.flatten(Air_IR_Mixed_Ice, type='ndarray', dtype=np.float64)).astype(int)
+		Air_IR_Mixed_Liquid = np.round(gu.flatten(Air_IR_Mixed_Liquid, type='ndarray', dtype=np.float64)).astype(int)
+		
 		Air_Cyan_Liquid = np.round(gu.flatten(Air_Cyan_Liquid, type='ndarray', dtype=np.float64)).astype(int)
 		Air_Cyan_Ice = np.round(gu.flatten(Air_Cyan_Ice, type='ndarray', dtype=np.float64)).astype(int)
 		Air_Cyan_Mixed = np.round(gu.flatten(Air_Cyan_Mixed, type='ndarray', dtype=np.float64)).astype(int)
+		Air_Cyan_Mixed_Ice = np.round(gu.flatten(Air_Cyan_Mixed_Ice, type='ndarray', dtype=np.float64)).astype(int)
+		Air_Cyan_Mixed_Liquid = np.round(gu.flatten(Air_Cyan_Mixed_Liquid, type='ndarray', dtype=np.float64)).astype(int)
+		
 		Air_IRdiffCyan_Liquid = np.round(gu.flatten(Air_IRdiffCyan_Liquid, type='ndarray', dtype=np.float64)).astype(int)
 		Air_IRdiffCyan_Ice = np.round(gu.flatten(Air_IRdiffCyan_Ice, type='ndarray', dtype=np.float64)).astype(int)
 		Air_IRdiffCyan_Mixed = np.round(gu.flatten(Air_IRdiffCyan_Mixed, type='ndarray', dtype=np.float64)).astype(int)
+		Air_IRdiffCyan_Mixed_Ice = np.round(gu.flatten(Air_IRdiffCyan_Mixed_Ice, type='ndarray', dtype=np.float64)).astype(int)
+		Air_IRdiffCyan_Mixed_Liquid = np.round(gu.flatten(Air_IRdiffCyan_Mixed_Liquid, type='ndarray', dtype=np.float64)).astype(int)
+		
 		Air_IRdivCyan_Liquid = np.round(gu.flatten(Air_IRdivCyan_Liquid, type='ndarray', dtype=np.float64)).astype(int)
 		Air_IRdivCyan_Ice = np.round(gu.flatten(Air_IRdivCyan_Ice, type='ndarray', dtype=np.float64)).astype(int)
 		Air_IRdivCyan_Mixed = np.round(gu.flatten(Air_IRdivCyan_Mixed, type='ndarray', dtype=np.float64)).astype(int)
-		Air_RH_Liquid = gu.flatten(Air_RH_Liquid, type='ndarray', dtype=np.float64)
-		Air_RH_Ice = gu.flatten(Air_RH_Ice, type='ndarray', dtype=np.float64)
-		Air_RH_Mixed = gu.flatten(Air_RH_Mixed, type='ndarray', dtype=np.float64)
+		Air_IRdivCyan_Mixed_Ice = np.round(gu.flatten(Air_IRdivCyan_Mixed_Ice, type='ndarray', dtype=np.float64)).astype(int)
+		Air_IRdivCyan_Mixed_Liquid = np.round(gu.flatten(Air_IRdivCyan_Mixed_Liquid, type='ndarray', dtype=np.float64)).astype(int)
 		
 		if section1 is True:
 			"""Plots the back-to-back histograms of the space charge, IR and cyan for
@@ -2480,9 +2692,7 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 					  "-----------------------------------")
 				print("Mann-Whitney U-Test", sp.stats.mannwhitneyu(Air_SpaceCharge_Mixed, Cloud_SpaceCharge_Mixed, alternative='two-sided'))
 				print("Wilcoxon signed-rank test", sp.stats.wilcoxon(Air_SpaceCharge_Mixed, np.random.choice(Cloud_SpaceCharge_Mixed, Air_SpaceCharge_Mixed.size)))
-						
-				
-				
+
 				### Back2Back_Histogram ###
 				data = [[Cloud_SpaceCharge_Liquid, Cloud_SpaceCharge_Mixed],
 						[Cloud_SpaceCharge_Liquid, Cloud_SpaceCharge_Ice],
@@ -2522,14 +2732,14 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 					
 				### Side2Side histogram ###
 				
-				data = [Cloud_SpaceCharge_Liquid/1000, Cloud_SpaceCharge_Ice/1000, Cloud_SpaceCharge_Mixed/1000]
-				annotate = ["Liquid Clouds", "Ice Clouds", "Mixed Clouds"]
+				data = [Cloud_SpaceCharge_Liquid/1000, Cloud_SpaceCharge_Ice/1000, [Cloud_SpaceCharge_Mixed_Liquid/1000, Cloud_SpaceCharge_Mixed_Ice/1000]]
+				annotate = ["Liquid Cloud Layer", "Ice Cloud Layer", "Mixed Cloud Layer"]
 				bins = 'doane'
 				ylabel = ["Space Charge Density (nC m$^{-3}$)", "Space Charge Density (nC m$^{-3}$)", "Space Charge Density (nC m$^{-3}$)"]
 				xscale = ['log', 'log', 'log']
 				yscale = ['linear', 'linear', 'linear']
 				ylim = [[0.001,25], [0.001,25], [0.001,25]]
-				color = ["green", "blue", "pink"]
+				color = ["green", "blue", ["green", "blue"]]
 				filename = self.Storage_Path + 'Plots/Hypothesis_1/SpaceCharge_AllPhasesClouds_Histogram_Ravel.png'
 				
 				bins = Histogram_Side2Side(
@@ -2542,10 +2752,19 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 					xscale,
 					yscale,
 					color,
-					plot_stats=False)
+					plot_stats=False,
+					fontsize=14)
 								
-				data = [Air_SpaceCharge_Liquid/1000, Air_SpaceCharge_Ice/1000, Air_SpaceCharge_Mixed/1000]
-				annotate = ["Liquid Air", "Ice Air", "Mixed Air"]
+				#data = [Air_SpaceCharge_Liquid/1000, Air_SpaceCharge_Ice/1000, Air_SpaceCharge_Mixed/1000]
+				print("Lengths")
+				print("Air_SpaceCharge_Liquid", Air_SpaceCharge_Liquid.size)
+				print("Air_SpaceCharge_Ice", Air_SpaceCharge_Ice.size)
+				print("Air_SpaceCharge_Mixed", Air_SpaceCharge_Mixed.size)
+				print("Air_SpaceCharge_Mixed_Liquid", Air_SpaceCharge_Mixed_Liquid.size)
+				print("Air_SpaceCharge_Mixed_Ice", Air_SpaceCharge_Mixed_Ice.size)
+				
+				data = [Air_SpaceCharge_Liquid/1000, Air_SpaceCharge_Ice/1000, [Air_SpaceCharge_Mixed_Liquid/1000, Air_SpaceCharge_Mixed_Ice/1000]]
+				annotate = ["Super-Zero\n     Dry-Air Layer", "Sub-Zero\n     Dry-Air Layer", "Mixed Dry-Air Layer"]
 				filename = self.Storage_Path + 'Plots/Hypothesis_1/SpaceCharge_AllPhasesAir_Histogram_Ravel.png'
 				
 				Histogram_Side2Side(
@@ -2558,7 +2777,8 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 					xscale,
 					yscale,
 					color,
-					plot_stats=False)
+					plot_stats=False,
+					fontsize=14)
 					
 				data = [Cloud_SpaceCharge_Mixed_Liquid/1000, Cloud_SpaceCharge_Mixed_Ice/1000]
 				annotate = ["Mixed Clouds (Liquid Phase)", "Mixed Clouds (Ice Phase)"]
@@ -2666,7 +2886,57 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 					plot_indivdual_color=individual_colors,
 					plot_positions=positions,
 					plot_legend=legend)
-
+			
+			if plot_cloud:
+				
+				data = [[Cloud_IR_Liquid, Cloud_IR_Ice, [Cloud_IR_Mixed_Liquid, Cloud_IR_Mixed_Ice]],
+						[Cloud_Cyan_Liquid, Cloud_Cyan_Ice, [Cloud_Cyan_Mixed_Liquid, Cloud_Cyan_Mixed_Ice]],
+						[Cloud_IRdiffCyan_Liquid, Cloud_IRdiffCyan_Ice, [Cloud_IRdiffCyan_Mixed_Liquid, Cloud_IRdiffCyan_Mixed_Ice]]]
+						
+				gu.stats(gu.flatten(data, type='ndarray', dtype=float, level=-1), output=True)
+				annotate = [["Liquid Clouds", "Ice Clouds", "Mixed Clouds"],
+							["Liquid Clouds", "Ice Clouds", "Mixed Clouds"],
+							["Liquid Clouds", "Ice Clouds", "Mixed Clouds"]]
+				bins = [[23,23,23],
+						[23,23,23],
+						[23,23,23]]
+				bins = 'doane'
+				ylabel = [["Infrared $N_{con}$ (cm$^{-3}$)", 
+							"Infrared $N_{con}$ (cm$^{-3}$)", 
+							"Infrared $N_{con}$ (cm$^{-3}$)"],
+							["Cyan $N_{con}$ (cm$^{-3}$)", 
+							"Cyan $N_{con}$ (cm$^{-3}$)", 
+							"Cyan $N_{con}$ (cm$^{-3}$)"],
+							["Infrared - Cyan $N_{con}$ (cm$^{-3}$)", 
+							"Infrared - Cyan $N_{con}$ (cm$^{-3}$)", 
+							"Infrared - Cyan $N_{con}$ (cm$^{-3}$)"]]
+				xscale = [['log', 'log', 'log'],
+							['log', 'log', 'log'],
+							['log', 'log', 'log']]
+				yscale = [['linear', 'linear', 'linear'],
+							['linear', 'linear', 'linear'],
+							['linear', 'linear', 'linear']]
+				ylim = [[[0,500], [0,500], [0,500]],
+						[[0,500], [0,500], [0,500]],
+						[[-350,350], [-350,350], [-350,350]]]
+				color = [["green", "blue", ["green", "blue"]], 
+						["green", "blue", ["green", "blue"]],
+						["green", "blue", ["green", "blue"]]]
+				filename = self.Storage_Path + 'Plots/Hypothesis_1/Cloud_AllPhasesClouds_Histogram_Ravel.png'
+				
+				bins = Histogram_Side2Side(
+					data, 
+					filename,
+					bins,
+					ylabel,
+					annotate,
+					ylim,
+					xscale,
+					yscale,
+					color,
+					plot_stats=False,
+					fontsize=14)
+			
 			if plot_ir is True:
 				
 				############################################################################
@@ -3242,10 +3512,6 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 		# Time Controls
 		t_begin = time.time()
 		
-		# Constants
-		k 			= 2500000/22468879568420441	#Coulombs Constant (exact value!)
-		kn2ms		= 0.5144					#Conversion between knots and m/s
-
 		Sensor = self.sensor_package
 		
 		# Radiosonde Data
@@ -3257,134 +3523,28 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 		
 		# Get Cloud and Clear-Air Heights
 		Cloud_Heights, Clear_Heights = self._CloudHeights(sensor=Sensor, method='Zhang')
-
-		############################################################################
-		"""Pre-Condition Data"""
 		
-		# Remove nan's from Time, Height, Wind, SpaceCharge
-		Time, Height, Wind, SpaceCharge = gu.antifinite((Radiosonde_Data['time'], 
-			Radiosonde_Data['height'],
-			Radiosonde_Data['WindSpeed'],
-			Radiosonde_Data['SpaceCharge']), 
-			unpack=True)
-				
-		# Detect sign changes in data
-		SignChange = np.where(np.diff(np.sign(SpaceCharge)))[0]
-		
-		# Get index of lowest cloud
-		# CloudIndex = gu.searchsorted(Radiosonde_Data['height'], Cloud_Heights[0])
-		CloudIndex = gu.searchsorted(Radiosonde_Data['height'], [0,12])
-		
-		# Get SignChange position for cloud
-		Cloud_SignChange = SignChange[(SignChange >= CloudIndex[0]) & (SignChange <= CloudIndex[1])]
-		
-		# Get time stamps of sign change
-		Cloud_TimeChange = Time[Cloud_SignChange]
-		
-		# Broadcast Cloud_SignChange into a 2D array which is easier to 
-		# use with for loops.
-		Cloud_SignChange = gu.broadcast(Cloud_SignChange,2,1) + 1
+		# Conditionals
+		ElectricField_Method = 'static'
 		
 		############################################################################
-		"""Set-up electric field environment"""
+		"""Estimate Potential Gradeint"""
 		
-		# [1] SPACE CHARGE DENSITY
-		# Calculate the 95th percentile of the space charge density between
-		# each polarity inversion. Making sure to conserve local sign.
-		Cloud_SpaceCharge = np.zeros(Cloud_SignChange.shape[0])
-		for i,  space in enumerate(Cloud_SignChange):
-			Local_SpaceCharge = SpaceCharge[space[0]:space[1]]
-			Local_Sign = sp.stats.mode(np.sign(Local_SpaceCharge))[0][0]
-			Cloud_SpaceCharge[i] = Local_Sign*np.nanpercentile(np.abs(Local_SpaceCharge), 100)
-		
-		# Convert space charge from pC to C
-		Cloud_SpaceCharge /= 10**12
-		
-		# [2] POINT CHARGE HEIGHT
-		# Calculate the height positions for each point charge. i.e. between 
-		# each sign change the absolute maximum space charge value is found
-		# and then indexed onto the height array.
-		Cloud_Height = np.zeros(Cloud_SignChange.shape[0])
-		for i, space in enumerate(Cloud_SignChange):
-			
-			# Get the local index of the absolute maximum space charge density
-			mask = np.argmax(np.abs(SpaceCharge[space[0]:space[1]]))
-			
-			# Find the height using 'mask' on the same subsetted data
-			PC_Height = Height[space[0]:space[1]][mask]
-			
-			# Determine the horizontal distance between RUAO and Point Charge.
-			Cloud_Height[i] = ((Radiosonde_Data['range'][space[0]:space[1]][mask]/1000)**2 + PC_Height**2)**0.5
-				
-		# Convert heights from km to m
-		Cloud_Height *= 1000
-		
-		# [3] POINT CHARGE AREA
-		# Calculate the area that each point charge corresponds to. Here
-		# we use the vertical height gained between sign changes.
-		Cloud_AscentArea = np.array([Height[space[1]] - Height[space[0]] for space in Cloud_SignChange], dtype=np.float64)*1000
-		
-		# [4] CLOUD CHARGE
-		# Now calculate the charge within the area.
-		Cloud_Charge = Cloud_SpaceCharge * (4/3)*np.pi*Cloud_AscentArea**3 # * 3
-		
-		# [5] CLOUD VELOCITY
-		# Calculate the velocity of each point charge.
-		Cloud_Velocity = np.array([np.nanmean(Wind[space[0]:space[1]]) for space in Cloud_SignChange], dtype=np.float64) # /4.5
-		
-		# [6] CLOUD TIME
-		# Specify the time range in seconds to calculate the electric field over.
-		# The time range revolves around the first point charge specified,
-		# therefore, Cloud_Time is typically specified with +- bounds. 
-		Cloud_Time = np.arange(-3000, 3000, 1)
-		
-		# [7] CLOUD TIME DIFFERENCE
-		# Get the time for each point charge.
-		Cloud_TimeDiff = np.zeros(Cloud_SignChange.shape[0])
-		for i, space in enumerate(Cloud_SignChange):
-			
-			# Get the local index of the absolute maximum space charge density
-			mask = np.argmax(np.abs(SpaceCharge[space[0]:space[1]]))
-			
-			# Find the height using 'mask' on the same subsetted data
-			Cloud_TimeDiff[i] = Time[space[0]:space[1]][mask]
-		Cloud_TimeDiff -= Cloud_TimeDiff[0]
-
+		Cloud_DateTime, Cloud_ElectricField, Cloud_ElectricField_Total = self._ElectricField_Estimator(
+										self.Radiosonde_Data[Sensor], 
+										Cloud_Heights, 
+										self.LaunchTime[int(Sensor)], 
+										method=ElectricField_Method)
+		print("11111111111111111")
 		############################################################################
-		"""Calculate the electric field"""
-		
-		# [8] ELECTRIC FIELD CALCULATION
-		# Now the Cloud_Time, Cloud_TimeDiff, Cloud_Velocity, Cloud_Height and 
-		# Cloud_Charge has been calculated, the electric field can now be found
-		Cloud_ElectricField = zip(np.zeros(Cloud_SignChange.shape[0]))
-		for i, (time_diff, height, velocity, charge) in enumerate(
-				zip(Cloud_TimeDiff, Cloud_Height, Cloud_Velocity, Cloud_Charge)):
-			
-			#Cloud_ElectricField[i] = (gu.cosarctan(((Cloud_Time+time_diff)*velocity)/height)*charge)/(k*height**2)
-			Cloud_ElectricField[i] = (gu.cosarctan(((Cloud_Time-time_diff)*velocity)/height)*charge)/(k*height**2)
-			
-		# Add the background electric field to the calculations. For now we can
-		# assume the background electric field is 100 V/m.
-		Cloud_ElectricField_Total = 0 + np.nansum(Cloud_ElectricField, axis=0)
-		
-		############################################################################
-		"""Determine the time stamp data for the flight"""
-		
-		# Get the launch date for the radiosonde.
-		LaunchDate = self.LaunchTime[int(Sensor)].astype('datetime64[D]')
-		
-		# Get the time when the radiosonde reached the cloud base
-		Cloud_BaseTime = self.LaunchTime[int(Sensor)] + np.timedelta64(int(Radiosonde_Data['time'][CloudIndex[0]]), 's')
-
-		# Calculate datetimes for each calculation in Cloud_ElectricField_Total
-		Cloud_DateTime = Cloud_BaseTime + Cloud_Time.astype('timedelta64[s]')
+		"""Import measured PG data from the RUAO"""
 		
 		# Import PG data from the RUAO.
-		ID = np.where(Data['Date_ID'] == Cloud_BaseTime.astype('datetime64[D]').astype('datetime64[s]').astype(datetime))[0][0]
+		ID = np.where(Data['Date_ID'] == self.LaunchTime[int(Sensor)].astype('datetime64[D]').astype('datetime64[s]').astype(datetime))[0][0]
+		print(self.data['FieldMill_RUAO_1sec_Processed_File'][ID])
+		print(self.LaunchTime[int(Sensor)].astype('datetime64[D]').astype('datetime64[s]').astype(datetime))
 		Field_Mill_Time, Field_Mill_PG = EPCC_Data.FieldMill_Calibrate(self.data['FieldMill_RUAO_1sec_Processed_File'][ID], hours2dt=True)
-		print("self.data['FieldMill_RUAO_1sec_Processed_File'][ID]", self.data['FieldMill_RUAO_1sec_Processed_File'][ID])
-		print("Cloud_DateTime", Cloud_DateTime)
-		print("Field_Mill_Time", Field_Mill_Time)
+
 		# Subset PG to match Estimated Electric Field
 		mask = (Field_Mill_Time >= Cloud_DateTime[0]) & (Field_Mill_Time <= Cloud_DateTime[-1])
 		Field_Mill_Time = Field_Mill_Time[mask]
@@ -3394,6 +3554,7 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 		"""Calculate Statistics"""
 		
 		Test = gu.antifinite((Field_Mill_PG, Cloud_ElectricField_Total))
+		
 		print("Test", Test)
 		print("R-Squared =", gu.R1to1(*Test))
 		#print(sp.stats.anderson_ksamp((Test[0], Test[1])))
@@ -3436,7 +3597,7 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 		#plt.gcf().set_size_inches((11.7/6), 8.3)
 		
 		#Save figure
-		filename = self.Storage_Path + 'Plots/Hypothesis_2/ElectricField_Estimate_RadiosondeNo.%s.png' % Sensor.rjust(2, '0')
+		filename = self.Storage_Path + 'Plots/Hypothesis_2/ElectricField_Estimate_RadiosondeNo.%s_%s.png' % (Sensor.rjust(2, '0'), ElectricField_Method.capitalize())
 		plt.savefig(filename, bbox_inches='tight', pad_inches=0.1, dpi=300)		
 		
 		############################################################################
@@ -3465,7 +3626,7 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 		ax1.get_yaxis().get_major_formatter().set_scientific(False)
 		
 		#Save figure
-		filename = self.Storage_Path + 'Plots/Hypothesis_2/ElectricField_Estimate_RadiosondeNo.%s_Decoupled.png' % Sensor.rjust(2, '0')
+		filename = self.Storage_Path + 'Plots/Hypothesis_2/ElectricField_Estimate_RadiosondeNo.%s_%s_Decoupled.png' % (Sensor.rjust(2, '0'), ElectricField_Method.capitalize())
 		plt.savefig(filename, bbox_inches='tight', pad_inches=0.1, dpi=300)		
 		
 	def Hypothesis2(self):

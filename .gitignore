@@ -113,8 +113,13 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+<<<<<<< HEAD
 # Documents
 Development/
 Documents/
 Matlab_Code/
 Plots.lnk
+=======
+# User defined
+Backups/
+>>>>>>> e68cffd40c1ac45998dcaff606151507c099daee
