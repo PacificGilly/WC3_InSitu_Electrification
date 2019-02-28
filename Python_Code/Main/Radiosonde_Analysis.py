@@ -4,8 +4,8 @@ __project__ = "Electrical Pre-Conditioning of Convective Clouds"
 __title__ = "Plotting Radiosonde Data"
 __author__ = "James Gilmore"
 __email__ = "james.gilmore@pgr.reading.ac.uk"
-__version__ = "1.13"
-__date__ = "25/02/2019"
+__version__ = "1.14"
+__date__ = "28/02/2019"
 __status__ = "Stable"
 __changelog__ = "Added in Case Study sections"
 
@@ -2325,8 +2325,8 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 		
 		# Conditionals
 		section1 = True
-		plot_spacecharge	= True
-		plot_cloud			= False
+		plot_spacecharge	= False
+		plot_cloud			= True
 		plot_ir				= False
 		plot_cyan			= False
 		plot_ircyan_diff	= False
@@ -2421,7 +2421,8 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 		Air_RH_Mixed_Liquid = []
 		
 		Sensor_Package = np.arange(1,11).astype('S2') # Use for Space Charge Plots Only
-		#Sensor_Package = ['3', '4', '5', '9', '10'] # Use for Cloud Sensor Plots Only
+		Sensor_Package = ['4', '5', '6', '9'] # Use for Space Charge Plots Only (Convective Subset)
+		Sensor_Package = ['3', '4', '5', '9', '10'] # Use for Cloud Sensor Plots Only
 		#Sensor_Package = ['9', '10']
 		#Sensor_Package = ['4']
 		for sensor in Sensor_Package:
@@ -2894,9 +2895,9 @@ class Radiosonde(EPCC_Importer, Radiosonde_Checks, SPRadiosonde, SPTephigram):
 						[Cloud_IRdiffCyan_Liquid, Cloud_IRdiffCyan_Ice, [Cloud_IRdiffCyan_Mixed_Liquid, Cloud_IRdiffCyan_Mixed_Ice]]]
 						
 				gu.stats(gu.flatten(data, type='ndarray', dtype=float, level=-1), output=True)
-				annotate = [["Liquid Clouds", "Ice Clouds", "Mixed Clouds"],
-							["Liquid Clouds", "Ice Clouds", "Mixed Clouds"],
-							["Liquid Clouds", "Ice Clouds", "Mixed Clouds"]]
+				annotate = [["Liquid Cloud Layers", "Ice Cloud Layers", "Mixed Cloud Layers"],
+							["Liquid Cloud Layers", "Ice Cloud Layers", "Mixed Cloud Layers"],
+							["Liquid Cloud Layers", "Ice Cloud Layers", "Mixed Cloud Layers"]]
 				bins = [[23,23,23],
 						[23,23,23],
 						[23,23,23]]
